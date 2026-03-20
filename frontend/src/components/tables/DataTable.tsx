@@ -27,7 +27,7 @@ export function DataTable({ rowData, columnDefs, height = 400, onRowClick, onCel
   }
 
   const onGridReady = useCallback((e: GridReadyEvent) => {
-    e.api.sizeColumnsToFit()
+    setTimeout(() => e.api.sizeColumnsToFit(), 0)
   }, [])
 
   return (
