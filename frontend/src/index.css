@@ -1,0 +1,117 @@
+@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * { box-sizing: border-box; }
+  html, body {
+    height: 100%;
+    @apply text-white;
+    font-family: 'IBM Plex Sans', system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    background-color: #000;
+    background-image: 
+      linear-gradient(rgba(0, 0, 0, 0.60), rgba(0, 0, 0, 0.60)),
+      url('/assets/circuit_bg.png');
+    background-size: cover;
+    background-position: center;
+    background-attachment: fixed;
+  }
+}
+
+.app-shell {
+  background: transparent;
+}
+
+.glass {
+  @apply bg-white/[0.06] backdrop-blur-3xl border border-white/15 shadow-2xl;
+}
+
+.glass-dark {
+  @apply bg-zinc-900/20 backdrop-blur-3xl border border-white/[0.07] shadow-2xl;
+}
+
+.glass-light {
+  @apply bg-white/[0.08] backdrop-blur-3xl border border-white/20 shadow-2xl;
+}
+
+/* AG Grid custom theme overrides - Ultra-Premium Glass Edition */
+.ag-theme-alpine {
+  --ag-font-family: 'IBM Plex Sans', system-ui, sans-serif;
+  --ag-font-size: 13px;
+  --ag-header-height: 52px;
+  --ag-row-height: 48px;
+  --ag-border-color: rgba(255, 255, 255, 0.1);
+  --ag-header-background-color: rgba(255, 255, 255, 0.05);
+  --ag-header-foreground-color: #ffffff;
+  --ag-odd-row-background-color: transparent;
+  --ag-even-row-background-color: rgba(255, 255, 255, 0.04);
+  --ag-row-hover-color: rgba(255, 255, 255, 0.15);
+  --ag-selected-row-background-color: rgba(255, 255, 255, 0.25);
+  --ag-range-selection-border-color: #ffffff;
+  --ag-input-focus-border-color: rgba(255, 255, 255, 0.5);
+  --ag-checkbox-checked-color: #ffffff;
+  --ag-background-color: transparent;
+  --ag-foreground-color: #ffffff;
+}
+
+.ag-root-wrapper {
+  background-color: transparent !important;
+  border: none !important;
+}
+
+.ag-header {
+  border-bottom: 2px solid rgba(255, 255, 255, 0.15) !important;
+}
+
+.ag-theme-alpine .ag-header-cell-label {
+  font-weight: 800;
+  text-transform: uppercase;
+  font-size: 11px;
+  letter-spacing: 0.15em;
+  color: #fff;
+}
+
+.ag-theme-alpine .ag-header-cell-resize::after {
+  background-color: rgba(255, 255, 255, 0.1);
+}
+
+.ag-theme-alpine .ag-row {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05) !important;
+  background-color: transparent !important;
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.ag-theme-alpine .ag-row-even {
+  background-color: rgba(255, 255, 255, 0.03) !important;
+}
+
+.ag-theme-alpine .ag-row:hover {
+  background-color: rgba(255, 255, 255, 0.08) !important;
+}
+
+.ag-theme-alpine .ag-cell {
+  color: rgba(255, 255, 255, 0.9);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Pivot table group header styles */
+.pivot-header-actual .ag-header-group-cell-label { color: rgba(255,255,255,0.9) !important; }
+.pivot-header-forecast .ag-header-group-cell-label { color: #86efac !important; }
+
+/* Pivot table cell styles - Readable on glass */
+.cell-actual { color: rgba(255, 255, 255, 1); }
+.cell-forecast { color: #818cf8; background-color: rgba(129, 140, 248, 0.1); }
+.cell-adjusted { color: #fbbf24; background-color: rgba(251, 191, 36, 0.1); font-weight: 700; }
+.cell-critical { color: #f87171; background-color: rgba(248, 113, 113, 0.1); font-weight: 700; }
+.cell-warning { color: #fb923c; background-color: rgba(251, 146, 60, 0.1); }
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.2); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.3); }

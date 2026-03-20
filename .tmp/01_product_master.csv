@@ -1,0 +1,101 @@
+sku,description,category,cost,selling_price,lead_time_days,moq
+SKU-001,Precision Control Board 5A,Electronics,181.67,279.72,28,5
+SKU-002,Industrial Pump Assembly 25mm,Hydraulics,154.3,287.26,21,20
+SKU-003,High-Performance Valve Manifold 150W,Pneumatics,524.56,1019.44,14,25
+SKU-004,"Precision Bearing Set 3/4""",Bearings,66.48,137.64,21,25
+SKU-005,Advanced Coupling 24V,Drive Systems,193.39,364.41,14,20
+SKU-006,High-Performance Temp Sensor 500W,Sensors,154.38,221.67,14,200
+SKU-007,High-Performance Compression Fitting 48V,Fittings,414.2,747.22,7,10
+SKU-008,Sealed Strainer Element 10A,Filtration,213.49,427.63,7,20
+SKU-009,Precision Terminal Block 48V,Electrical,570.13,922.17,28,200
+SKU-010,Heavy-Duty Anchor Plate M20,Structural,163.32,298.41,14,100
+SKU-011,"Heavy-Duty Level Gauge 1/2""",Lubrication,62.73,87.2,7,10
+SKU-012,"Precision V-Ring Seal 3/4""",Seals,388.94,679.81,14,1
+SKU-013,High-Performance Washer Pack M12,Fasteners,193.6,287.39,7,25
+SKU-014,Precision Driver Module 500W,Electronics,416.76,778.35,7,50
+SKU-015,Sealed Pump Assembly 48V,Hydraulics,213.4,291.62,14,25
+SKU-016,Precision Valve Manifold 5A,Pneumatics,317.95,447.94,21,10
+SKU-017,Heavy-Duty Thrust Bearing 24V,Bearings,567.59,970.39,7,20
+SKU-018,Standard Belt Drive 24V,Drive Systems,295.66,461.44,7,50
+SKU-019,Compact Temp Sensor M12,Sensors,461.27,645.8,7,1
+SKU-020,Modular Push-In Connector 24V,Fittings,89.47,191.93,21,200
+SKU-021,Compact Filter Cartridge M12,Filtration,429.7,709.5,14,200
+SKU-022,"Precision Cable Gland 3/4""",Electrical,474.43,963.33,7,20
+SKU-023,Advanced Support Frame 40mm,Structural,302.86,633.98,7,200
+SKU-024,Sealed Lube Pump M12,Lubrication,602.43,1247.87,7,100
+SKU-025,"Industrial Shaft Seal 3/4""",Seals,5.39,9.07,14,25
+SKU-026,Sealed Nut Assortment M20,Fasteners,126.67,194.44,7,1
+SKU-027,Sealed Signal Converter M20,Electronics,40.74,72.58,7,5
+SKU-028,Precision Filter Housing 25mm,Hydraulics,377.98,523.04,7,100
+SKU-029,Compact Air Regulator 25mm,Pneumatics,175.59,256.58,28,25
+SKU-030,"Precision Bearing Set 1/2""",Bearings,405.27,741.05,7,5
+SKU-031,Standard Coupling 25mm,Drive Systems,242.71,360.2,21,25
+SKU-032,High-Performance Temp Sensor M20,Sensors,174.84,368.26,28,10
+SKU-033,Standard Push-In Connector 10A,Fittings,413.72,651.36,14,25
+SKU-034,High-Performance Filter Cartridge M8,Filtration,219.48,320.7,14,10
+SKU-035,Industrial Cable Gland M12,Electrical,614.5,1190.51,7,1
+SKU-036,Heavy-Duty Mounting Bracket 40mm,Structural,239.56,513.41,7,50
+SKU-037,Standard Level Gauge 500W,Lubrication,266.52,500.41,7,20
+SKU-038,Advanced O-Ring Kit M20,Seals,479.82,783.24,14,20
+SKU-039,Advanced Hex Bolt Set 500W,Fasteners,308.07,468.15,14,50
+SKU-040,Compact Control Board 10A,Electronics,128.76,209.75,7,25
+SKU-041,Sealed Cylinder M8,Hydraulics,78.51,170.75,7,25
+SKU-042,Standard Solenoid Valve 48V,Pneumatics,639.82,926.65,21,20
+SKU-043,Sealed Ball Bearing 10A,Bearings,468.75,928.43,28,20
+SKU-044,Standard Shaft Collar 50mm,Drive Systems,432.55,629.76,14,25
+SKU-045,Sealed Pressure Transducer 25mm,Sensors,275.61,592.37,28,10
+SKU-046,Industrial Elbow Joint 40mm,Fittings,139.78,282.06,21,50
+SKU-047,Sealed Oil Filter 150W,Filtration,586.16,1187.92,7,5
+SKU-048,Standard Cable Gland 500W,Electrical,618.99,959.21,14,20
+SKU-049,Modular Weld Nut 500W,Structural,500.44,869.32,28,20
+SKU-050,Industrial Lube Pump 150W,Lubrication,278.64,417.82,28,200
+SKU-051,Precision V-Ring Seal M20,Seals,521.72,1000.37,21,50
+SKU-052,Sealed Nut Assortment 500W,Fasteners,589.83,1019.83,7,200
+SKU-053,"High-Performance Signal Converter 1/2""",Electronics,408.88,647.42,7,25
+SKU-054,Sealed Pump Assembly M20,Hydraulics,101.44,169.97,7,20
+SKU-055,Modular Solenoid Valve M8,Pneumatics,137.62,234.93,21,1
+SKU-056,Standard Thrust Bearing 150W,Bearings,255.93,539.47,14,20
+SKU-057,Industrial Belt Drive 50mm,Drive Systems,436.09,884.57,28,10
+SKU-058,"Sealed Temp Sensor 3/4""",Sensors,386.36,739.32,7,100
+SKU-059,High-Performance Reducer Bushing 50mm,Fittings,140.73,229.08,14,25
+SKU-060,Industrial Air Filter M8,Filtration,649.94,1070.75,28,5
+SKU-061,Compact Cable Gland 48V,Electrical,102.44,149.28,28,5
+SKU-062,High-Performance Anchor Plate M20,Structural,395.41,857.71,28,5
+SKU-063,Industrial Oil Reservoir 48V,Lubrication,441.57,955.75,14,20
+SKU-064,Compact O-Ring Kit 5A,Seals,503.02,1042.63,21,5
+SKU-065,Advanced Washer Pack M12,Fasteners,330.85,542.61,14,200
+SKU-066,"Modular Power Supply 3/4""",Electronics,117.78,211.24,28,25
+SKU-067,Stainless Cylinder 50mm,Hydraulics,554.21,1139.52,7,25
+SKU-068,Stainless Solenoid Valve 50mm,Pneumatics,22.54,46.73,7,200
+SKU-069,High-Performance Ball Bearing 5A,Bearings,572.55,1043.43,21,20
+SKU-070,Sealed Servo Motor 5A,Drive Systems,311.56,609.12,14,1
+SKU-071,Compact Flow Meter 10A,Sensors,379.68,665.3,21,50
+SKU-072,Standard Reducer Bushing 40mm,Fittings,202.08,312.41,28,20
+SKU-073,Heavy-Duty Strainer Element 25mm,Filtration,481.14,762.62,21,25
+SKU-074,Standard Terminal Block 40mm,Electrical,13.14,23.7,14,1
+SKU-075,Heavy-Duty Strut Channel M12,Structural,567.78,1043.55,14,200
+SKU-076,High-Performance Dispensing Valve M12,Lubrication,535.09,904.62,7,1
+SKU-077,High-Performance O-Ring Kit 25mm,Seals,80.52,161.02,21,20
+SKU-078,"High-Performance Stud Bolt 3/4""",Fasteners,201.28,377.98,21,5
+SKU-079,Precision Power Supply 25mm,Electronics,116.28,164.4,7,100
+SKU-080,Industrial Valve Block 40mm,Hydraulics,460.69,897.21,14,5
+SKU-081,"Stainless Cylinder Unit 3/4""",Pneumatics,78.15,120.44,7,25
+SKU-082,High-Performance Ball Bearing 5A,Bearings,536.46,1144.28,14,5
+SKU-083,High-Performance Shaft Collar 24V,Drive Systems,322.99,458.12,7,100
+SKU-084,Compact Proximity Switch 48V,Sensors,618.21,1359.84,28,25
+SKU-085,Modular Tube Fitting 10A,Fittings,289.68,459.56,21,100
+SKU-086,Advanced Coalescer Filter 50mm,Filtration,436.91,908.37,14,100
+SKU-087,"Sealed Cable Gland 1/2""",Electrical,60.89,95.26,7,100
+SKU-088,"Sealed Strut Channel 3/4""",Structural,39.02,69.87,21,200
+SKU-089,Sealed Grease Fitting 40mm,Lubrication,287.02,557.83,7,1
+SKU-090,"Industrial Lip Seal 3/4""",Seals,64.21,140.84,7,200
+SKU-091,High-Performance Stud Bolt 5A,Fasteners,180.63,372.01,14,20
+SKU-092,Stainless Signal Converter 5A,Electronics,572.04,1192.37,14,100
+SKU-093,Industrial Cylinder 5A,Hydraulics,196.87,363.99,28,200
+SKU-094,Standard Actuator 150W,Pneumatics,355.06,616.75,14,20
+SKU-095,Advanced Bearing Set 50mm,Bearings,485.08,945.64,14,100
+SKU-096,Sealed Shaft Collar 50mm,Drive Systems,565.83,1184.32,14,5
+SKU-097,Heavy-Duty Position Sensor 500W,Sensors,426.99,632.46,14,25
+SKU-098,Precision Elbow Joint 500W,Fittings,439.63,792.91,14,200
+SKU-099,High-Performance Strainer Element 5A,Filtration,62.39,136.11,28,5
+SKU-100,Industrial Cable Gland 50mm,Electrical,518.31,828.97,14,100
