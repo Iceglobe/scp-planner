@@ -1,10 +1,10 @@
 import { clsx } from 'clsx'
-import { ReactNode } from 'react'
+import { CSSProperties, ReactNode } from 'react'
 
 // --- Card ---
-export function Card({ children, className }: { children: ReactNode; className?: string }) {
+export function Card({ children, className, style }: { children: ReactNode; className?: string; style?: CSSProperties }) {
   return (
-    <div className={clsx('glass rounded-2xl p-6 transition-all duration-300 hover:bg-white/10', className)}>
+    <div className={clsx('glass rounded-2xl p-6 transition-all duration-300 hover:bg-white/10', className)} style={style}>
       {children}
     </div>
   )
@@ -67,17 +67,19 @@ export function KpiCard({
       <p className={clsx('text-3xl font-bold tracking-tight leading-none text-white', alert && 'text-red-400')}>
         {value}
       </p>
-      <div className="flex items-center justify-between mt-3 pt-3 border-t border-white/10">
-        {sub && <p className="text-[11px] text-white/70 font-medium">{sub}</p>}
-        {trend != null && (
-          <span className={clsx(
-            'inline-flex items-center gap-0.5 text-[11px] font-bold px-1.5 py-0.5 rounded-md backdrop-blur-sm',
-            trend > 0 ? 'text-indigo-400 bg-indigo-400/10' : trend < 0 ? 'text-red-400 bg-red-400/10' : 'text-white/20 bg-white/5'
-          )}>
-            {trend > 0 ? '↑' : trend < 0 ? '↓' : '—'} {Math.abs(trend).toFixed(1)}%
-          </span>
-        )}
-      </div>
+      {(sub || trend != null) && (
+        <div className="flex items-center justify-between mt-3 pt-3 border-t border-white/10">
+          {sub && <p className="text-[11px] text-white/70 font-medium">{sub}</p>}
+          {trend != null && (
+            <span className={clsx(
+              'inline-flex items-center gap-0.5 text-[11px] font-bold px-1.5 py-0.5 rounded-md backdrop-blur-sm',
+              trend > 0 ? 'text-indigo-400 bg-indigo-400/10' : trend < 0 ? 'text-red-400 bg-red-400/10' : 'text-white/20 bg-white/5'
+            )}>
+              {trend > 0 ? '↑' : trend < 0 ? '↓' : '—'} {Math.abs(trend).toFixed(1)}%
+            </span>
+          )}
+        </div>
+      )}
     </Card>
   )
 }

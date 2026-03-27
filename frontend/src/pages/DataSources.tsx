@@ -30,9 +30,9 @@ const ENTITIES = [
     value: 'sales_history',
     label: 'Sales History',
     description: 'Historical sales by SKU and period',
-    csvTemplate: 'sku,period_date,quantity,revenue\nSKU-001,2026-01-06,45,32400',
+    csvTemplate: 'sku,period_date,quantity,revenue,customers\nSKU-001,2026-01-06,45,32400,Acme Corp',
     requiredColumns: ['sku', 'period_date', 'quantity'],
-    optionalColumns: ['revenue'],
+    optionalColumns: ['revenue', 'customers'],
   },
   {
     value: 'inventory',
@@ -85,7 +85,7 @@ const EntitySection = forwardRef<EntitySectionHandle, { entity: typeof ENTITIES[
   const stored = (() => { try { return JSON.parse(localStorage.getItem(lsKey) || '{}') } catch { return {} } })()
 
   const [includeInRefreshAll, setIncludeInRefreshAll] = useState<boolean>(stored.includeInRefreshAll !== false)
-  const [connType, setConnType] = useState<string>(stored.connType || '')
+  const [connType, setConnType] = useState<string>(stored.connType || stored.lastConnType || '')
   const [file, setFile] = useState<File | null>(null)
   const [lastFileName, setLastFileName] = useState<string>(stored.lastFileName || '')
   const [lastConnType, setLastConnType] = useState<string>(stored.lastConnType || '')
@@ -194,7 +194,10 @@ const EntitySection = forwardRef<EntitySectionHandle, { entity: typeof ENTITIES[
         handleTestSQL()
         return
       }
-      if (result) setRefreshResult(result)
+      if (result) {
+        setRefreshResult(result)
+        window.dispatchEvent(new CustomEvent('datasource-refreshed'))
+      }
     } catch (e: unknown) {
       setRefreshError((e as Error).message || 'Refresh failed')
     } finally {
@@ -213,6 +216,7 @@ const EntitySection = forwardRef<EntitySectionHandle, { entity: typeof ENTITIES[
       setExcelResult(result)
       setLastConnType('excel_link')
       setLastSyncTime(new Date().toISOString())
+      window.dispatchEvent(new CustomEvent('datasource-refreshed'))
     } catch (e: unknown) {
       setExcelError((e as Error).message || 'Fetch failed')
     } finally {
@@ -422,12 +426,12 @@ const EntitySection = forwardRef<EntitySectionHandle, { entity: typeof ENTITIES[
             <label className="text-xs font-medium text-white/90 block mb-1">Connection string</label>
             <input type="text" value={sqlConn} onChange={e => setSqlConn(e.target.value)}
               placeholder="postgresql://user:pass@host:5432/db"
-              className="w-full text-sm border border-white/20 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-brand-500" />
+              className="w-full text-sm border border-white/20 rounded-lg px-3 py-2 bg-white text-zinc-900 placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-brand-500" />
           </div>
           <div>
             <label className="text-xs font-medium text-white/90 block mb-1">SQL query</label>
             <textarea value={sqlQuery} onChange={e => setSqlQuery(e.target.value)} rows={3}
-              className="w-full text-sm border border-white/20 rounded-lg px-3 py-2 font-mono focus:outline-none focus:ring-2 focus:ring-brand-500 resize-none" />
+              className="w-full text-sm border border-white/20 rounded-lg px-3 py-2 font-mono bg-white text-zinc-900 focus:outline-none focus:ring-2 focus:ring-brand-500 resize-none" />
           </div>
           <Button variant="secondary" onClick={handleTestSQL} disabled={!sqlConn || sqlTesting} className="w-full justify-center">
             <Database className="w-3.5 h-3.5" />
@@ -478,19 +482,19 @@ const EntitySection = forwardRef<EntitySectionHandle, { entity: typeof ENTITIES[
             <label className="text-xs font-medium text-white/90 block mb-1">Base URL</label>
             <input type="text" value={erpUrl} onChange={e => setErpUrl(e.target.value)}
               placeholder="https://your-erp.com/api/v1"
-              className="w-full text-sm border border-white/20 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-brand-500" />
+              className="w-full text-sm border border-white/20 rounded-lg px-3 py-2 bg-white text-zinc-900 placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-brand-500" />
           </div>
           <div>
             <label className="text-xs font-medium text-white/90 block mb-1">Auth header</label>
             <input type="text" value={erpAuth} onChange={e => setErpAuth(e.target.value)}
               placeholder="Bearer your-api-key"
-              className="w-full text-sm border border-white/20 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-brand-500" />
+              className="w-full text-sm border border-white/20 rounded-lg px-3 py-2 bg-white text-zinc-900 placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-brand-500" />
           </div>
           <div>
             <label className="text-xs font-medium text-white/90 block mb-1">Endpoint path</label>
             <input type="text" value={erpEndpoint} onChange={e => setErpEndpoint(e.target.value)}
               placeholder="/sales-orders"
-              className="w-full text-sm border border-white/20 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-brand-500" />
+              className="w-full text-sm border border-white/20 rounded-lg px-3 py-2 bg-white text-zinc-900 placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-brand-500" />
           </div>
           <Button variant="secondary" disabled={!erpUrl} className="w-full justify-center">
             <Globe className="w-3.5 h-3.5" />
@@ -507,7 +511,7 @@ const EntitySection = forwardRef<EntitySectionHandle, { entity: typeof ENTITIES[
             <label className="text-xs font-medium text-white/90 block mb-1">Excel / SharePoint file URL</label>
             <input type="text" value={excelLink} onChange={e => { setExcelLink(e.target.value); setExcelResult(null); setExcelError('') }}
               placeholder="https://drive.google.com/file/d/…/view"
-              className="w-full text-sm border border-white/20 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-brand-500" />
+              className="w-full text-sm border border-white/20 rounded-lg px-3 py-2 bg-white text-zinc-900 placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-brand-500" />
           </div>
           <Button variant="primary" onClick={handleFetchExcel} disabled={!excelLink || excelFetching} className="w-full justify-center">
             {excelFetching ? 'Fetching…' : 'Fetch & Import'}

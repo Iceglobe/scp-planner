@@ -1,10 +1,10 @@
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import Optional
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime
 from database import get_db
-from models import SalesHistory, Product, Forecast, CustomerDemand, ForecastRun, BomItem
+from models import SalesHistory, Product, Forecast, CustomerDemand, ForecastRun, BomItem, ForecastAdjustLog, CustomerPriority
 
 router = APIRouter()
 
@@ -15,6 +15,7 @@ class DemandRecord(BaseModel):
     quantity: float
     revenue: float = 0.0
     source: str = "actual"
+    customer: Optional[str] = None
 
 
 @router.get("")
@@ -35,7 +36,7 @@ def list_demand(
     rows = q.order_by(SalesHistory.period_date.desc()).limit(limit).all()
     return [
         {"id": r.id, "product_id": r.product_id, "period_date": r.period_date.isoformat(),
-         "quantity": r.quantity, "revenue": r.revenue, "source": r.source}
+         "quantity": r.quantity, "revenue": r.revenue, "source": r.source, "customer": r.customer}
         for r in rows
     ]
 
@@ -45,6 +46,7 @@ def create_demand(body: DemandRecord, db: Session = Depends(get_db)):
     existing = db.query(SalesHistory).filter(
         SalesHistory.product_id == body.product_id,
         SalesHistory.period_date == body.period_date,
+        SalesHistory.customer == body.customer,
     ).first()
     if existing:
         existing.quantity = body.quantity
@@ -61,6 +63,7 @@ def bulk_demand(records: list[DemandRecord], db: Session = Depends(get_db)):
         existing = db.query(SalesHistory).filter(
             SalesHistory.product_id == r.product_id,
             SalesHistory.period_date == r.period_date,
+            SalesHistory.customer == r.customer,
         ).first()
         if existing:
             existing.quantity = r.quantity
@@ -69,6 +72,221 @@ def bulk_demand(records: list[DemandRecord], db: Session = Depends(get_db)):
             db.add(SalesHistory(**r.model_dump()))
     db.commit()
     return {"inserted": len(records)}
+
+
+class CustomerForecastAdjust(BaseModel):
+    product_id: int
+    customer: str
+    year_month: str   # "YYYY-MM"
+    qty: float
+    adjusted_by: str = "user"
+
+
+@router.put("/customer-forecast/adjust")
+def adjust_customer_forecast(body: CustomerForecastAdjust, db: Session = Depends(get_db)):
+    """Update a single customer's forecast for a month, then re-aggregate to the Forecast table."""
+    from sqlalchemy import func
+    try:
+        year, month = int(body.year_month[:4]), int(body.year_month[5:7])
+    except (ValueError, IndexError):
+        raise HTTPException(400, "year_month must be YYYY-MM")
+    month_start = date(year, month, 1)
+
+    # Upsert the CustomerDemand forecast row
+    cd = db.query(CustomerDemand).filter(
+        CustomerDemand.product_id == body.product_id,
+        CustomerDemand.customer == body.customer,
+        CustomerDemand.period_date == month_start,
+        CustomerDemand.source == "forecast",
+    ).first()
+    old_qty = cd.quantity if cd else None
+    if cd:
+        cd.quantity = body.qty
+        cd.is_adjusted = True
+    else:
+        cd = CustomerDemand(
+            product_id=body.product_id, customer=body.customer,
+            period_date=month_start, quantity=body.qty, source="forecast",
+            is_adjusted=True,
+        )
+        db.add(cd)
+    db.flush()
+
+    # Log to adjustment log
+    db.add(ForecastAdjustLog(
+        product_id=body.product_id,
+        period_date=month_start,
+        old_qty=old_qty,
+        new_qty=body.qty,
+        changed_by=body.adjusted_by,
+        customer=body.customer,
+    ))
+    db.flush()
+
+    # Re-sum all customer forecasts for this product+month → update the Forecast row
+    total_qty = db.query(func.sum(CustomerDemand.quantity)).filter(
+        CustomerDemand.product_id == body.product_id,
+        CustomerDemand.source == "forecast",
+        CustomerDemand.period_date == month_start,
+    ).scalar() or 0.0
+
+    latest_run = db.query(ForecastRun).order_by(ForecastRun.created_at.desc()).first()
+    if latest_run:
+        f = db.query(Forecast).filter(
+            Forecast.product_id == body.product_id,
+            Forecast.period_date == month_start,
+            Forecast.run_id == latest_run.run_id,
+        ).first()
+        if f:
+            f.is_adjusted = True
+            f.adjusted_qty = total_qty
+            f.adjusted_by = body.adjusted_by
+            f.adjusted_at = datetime.utcnow()
+
+    db.commit()
+    return {"ok": True, "month": body.year_month, "customer": body.customer, "qty": body.qty, "sku_total": total_qty}
+
+
+class CustomerForecastNote(BaseModel):
+    product_id: int
+    customer: str
+    year_month: str  # "YYYY-MM"
+    note: Optional[str]
+
+
+@router.patch("/customer-forecast/note")
+def set_customer_forecast_note(body: CustomerForecastNote, db: Session = Depends(get_db)):
+    """Set or clear the note on a customer forecast cell."""
+    try:
+        year, month = int(body.year_month[:4]), int(body.year_month[5:7])
+    except (ValueError, IndexError):
+        raise HTTPException(400, "year_month must be YYYY-MM")
+    month_start = date(year, month, 1)
+
+    cd = db.query(CustomerDemand).filter(
+        CustomerDemand.product_id == body.product_id,
+        CustomerDemand.customer == body.customer,
+        CustomerDemand.period_date == month_start,
+        CustomerDemand.source == "forecast",
+    ).first()
+    if not cd:
+        raise HTTPException(404, "Customer forecast row not found")
+    cd.note = body.note
+
+    # Also update the most recent log entry for this product+customer+period
+    log_entry = db.query(ForecastAdjustLog).filter(
+        ForecastAdjustLog.product_id == body.product_id,
+        ForecastAdjustLog.customer == body.customer,
+        ForecastAdjustLog.period_date == month_start,
+    ).order_by(ForecastAdjustLog.changed_at.desc()).first()
+    if not log_entry:
+        # Fallback: old entries created before migration 005 have customer=NULL
+        log_entry = db.query(ForecastAdjustLog).filter(
+            ForecastAdjustLog.product_id == body.product_id,
+            ForecastAdjustLog.period_date == month_start,
+            ForecastAdjustLog.customer == None,
+            ForecastAdjustLog.forecast_id == None,
+        ).order_by(ForecastAdjustLog.changed_at.desc()).first()
+        if log_entry:
+            log_entry.customer = body.customer  # backfill the customer while we're here
+    if log_entry:
+        log_entry.note = body.note
+
+    db.commit()
+    return {"ok": True}
+
+
+class CustomerForecastRevert(BaseModel):
+    product_id: int
+    customer: str
+    year_month: str  # "YYYY-MM"
+
+
+@router.delete("/customer-forecast/adjust")
+def revert_customer_forecast(body: CustomerForecastRevert, db: Session = Depends(get_db)):
+    """Revert a customer forecast back to its pre-adjustment value."""
+    from sqlalchemy import func
+    try:
+        year, month = int(body.year_month[:4]), int(body.year_month[5:7])
+    except (ValueError, IndexError):
+        raise HTTPException(400, "year_month must be YYYY-MM")
+    month_start = date(year, month, 1)
+
+    cd = db.query(CustomerDemand).filter(
+        CustomerDemand.product_id == body.product_id,
+        CustomerDemand.customer == body.customer,
+        CustomerDemand.period_date == month_start,
+        CustomerDemand.source == "forecast",
+    ).first()
+    if not cd:
+        raise HTTPException(404, "Customer forecast row not found")
+
+    # Delete the CustomerDemand row — no per-customer statistical forecast exists,
+    # so removing it makes the cell show "—" and the SKU aggregate falls back to ML forecast_qty.
+    db.delete(cd)
+    db.flush()
+
+    # Re-aggregate remaining customers to the Forecast table
+    total_qty = db.query(func.sum(CustomerDemand.quantity)).filter(
+        CustomerDemand.product_id == body.product_id,
+        CustomerDemand.source == "forecast",
+        CustomerDemand.period_date == month_start,
+    ).scalar() or 0.0
+
+    latest_run = db.query(ForecastRun).order_by(ForecastRun.created_at.desc()).first()
+    if latest_run:
+        f = db.query(Forecast).filter(
+            Forecast.product_id == body.product_id,
+            Forecast.period_date == month_start,
+            Forecast.run_id == latest_run.run_id,
+        ).first()
+        if f:
+            still_adjusted = db.query(CustomerDemand).filter(
+                CustomerDemand.product_id == body.product_id,
+                CustomerDemand.source == "forecast",
+                CustomerDemand.period_date == month_start,
+                CustomerDemand.is_adjusted == True,
+            ).first()
+            if still_adjusted:
+                f.adjusted_qty = total_qty
+            else:
+                f.is_adjusted = False
+                f.adjusted_qty = None
+                f.adjusted_by = None
+                f.adjusted_at = None
+
+    db.commit()
+    return {"ok": True, "month": body.year_month, "customer": body.customer}
+
+
+@router.get("/priority")
+def get_priorities(db: Session = Depends(get_db)):
+    """Return all (customer, product_id) priority pairs."""
+    rows = db.query(CustomerPriority).all()
+    return [{"customer": r.customer, "product_id": r.product_id} for r in rows]
+
+
+class PriorityToggleRequest(BaseModel):
+    customer: str
+    product_id: int
+
+
+@router.post("/priority/toggle")
+def toggle_priority(body: PriorityToggleRequest, db: Session = Depends(get_db)):
+    """Toggle priority for a customer/product pair. Returns the new state."""
+    existing = db.query(CustomerPriority).filter(
+        CustomerPriority.customer == body.customer,
+        CustomerPriority.product_id == body.product_id,
+    ).first()
+    if existing:
+        db.delete(existing)
+        db.commit()
+        return {"customer": body.customer, "product_id": body.product_id, "is_priority": False}
+    else:
+        row = CustomerPriority(customer=body.customer, product_id=body.product_id)
+        db.add(row)
+        db.commit()
+        return {"customer": body.customer, "product_id": body.product_id, "is_priority": True}
 
 
 @router.get("/customers")
@@ -92,14 +310,25 @@ def demand_pivot(
     today = date.today()
     if not from_date:
         from_date = today - timedelta(weeks=52)
+
+    # When loading a specific historical run, use its creation date as the perspective
+    # so columns are split at the run's horizon (not today's date).
+    run = None
+    if forecast_run_id:
+        run = db.query(ForecastRun).filter(ForecastRun.run_id == forecast_run_id).first()
+    else:
+        run = db.query(ForecastRun).order_by(ForecastRun.created_at.desc()).first()
+
+    perspective_date = today
+    if run and run.created_at:
+        run_date = run.created_at.date()
+        # Only shift perspective for historical runs (created more than 2 months ago)
+        if run_date < today.replace(day=1) - timedelta(days=1):
+            perspective_date = run_date
+
     if not to_date:
-        # Use the forecast run's periods_ahead (in months) to set the horizon
-        if forecast_run_id:
-            run = db.query(ForecastRun).filter(ForecastRun.run_id == forecast_run_id).first()
-        else:
-            run = db.query(ForecastRun).order_by(ForecastRun.created_at.desc()).first()
         if run and run.periods_ahead:
-            to_date = today + timedelta(weeks=run.periods_ahead * 4)
+            to_date = perspective_date + timedelta(weeks=run.periods_ahead * 4)
         else:
             to_date = today + timedelta(weeks=78)  # fallback: 18-month horizon
 
@@ -109,21 +338,42 @@ def demand_pivot(
         if child_ids:
             products_q = products_q.filter(~Product.id.in_(child_ids))
     products = products_q.order_by(Product.sku).all()
-    periods = _generate_periods(from_date, to_date, granularity)
+    periods = _generate_periods(from_date, to_date, granularity, perspective_date)
 
     if group_by == "customer":
-        return _pivot_by_customer(products, periods, from_date, to_date, today, granularity, db)
+        return _pivot_by_customer(products, periods, from_date, to_date, perspective_date, granularity, db)
 
     # ── SKU-level pivot (original behaviour) ─────────────────────────────────
     actuals = db.query(SalesHistory).filter(
         SalesHistory.period_date >= from_date,
-        SalesHistory.period_date <= today,
+        SalesHistory.period_date <= perspective_date,
     ).all()
-    actuals_map: dict[tuple, float] = {}
+    # Prefer NULL-customer aggregate rows to avoid double-counting when both
+    # aggregate (customer=NULL) and per-customer rows exist for the same period.
+    null_map: dict[tuple, float] = {}
+    cust_map: dict[tuple, float] = {}
     for a in actuals:
         pk = _period_key(a.period_date, granularity)
         key = (a.product_id, pk)
-        actuals_map[key] = actuals_map.get(key, 0) + a.quantity
+        if a.customer is None:
+            null_map[key] = null_map.get(key, 0) + a.quantity
+        else:
+            cust_map[key] = cust_map.get(key, 0) + a.quantity
+    # Also include named-customer CustomerDemand actuals (matches customer pivot behaviour)
+    cd_actuals = db.query(CustomerDemand).filter(
+        CustomerDemand.source == "actual",
+        CustomerDemand.customer.isnot(None),
+        CustomerDemand.period_date >= from_date,
+        CustomerDemand.period_date <= perspective_date,
+    ).all()
+    for a in cd_actuals:
+        pk = _period_key(a.period_date, granularity)
+        key = (a.product_id, pk)
+        cust_map[key] = cust_map.get(key, 0) + a.quantity
+    # Prefer per-customer sum when available (matches Demand Planning aggregate chart)
+    actuals_map: dict[tuple, float] = {}
+    for key in set(null_map.keys()) | set(cust_map.keys()):
+        actuals_map[key] = cust_map[key] if key in cust_map else null_map[key]
 
     fq = db.query(Forecast)
     if forecast_run_id:
@@ -139,7 +389,7 @@ def demand_pivot(
                      (Forecast.created_at == latest.c.latest))
 
     forecasts = fq.filter(
-        Forecast.period_date >= today,
+        Forecast.period_date >= perspective_date.replace(day=1),
         Forecast.period_date <= to_date,
     ).all()
 
@@ -154,6 +404,7 @@ def demand_pivot(
                 "id": f.id, "qty": qty or 0.0,
                 "original": f.forecast_qty or 0.0, "adjusted": f.is_adjusted,
                 "lower": f.lower_bound or 0.0, "upper": f.upper_bound or 0.0,
+                "note": f.adjusted_note if f.is_adjusted else None,
             }
         else:
             forecast_map[key]["qty"] = (forecast_map[key]["qty"] or 0.0) + (qty or 0.0)
@@ -194,6 +445,7 @@ def demand_pivot(
                 row[f"fu_{pk}"] = fd.get("upper")
                 row[f"fa_{pk}"] = fd.get("adjusted", False)
                 row[f"fid_{pk}"] = fd.get("id")
+                row[f"fn_{pk}"] = fd.get("note")
             else:
                 row[f"a_{pk}"] = actuals_map.get((p.id, pk))
         rows.append(row)
@@ -205,18 +457,38 @@ def _pivot_by_customer(products, periods, from_date, to_date, today, granularity
     """Build pivot grouped by customer × SKU."""
     from sqlalchemy import distinct
 
-    # Fetch all distinct customers
-    customer_rows = db.query(distinct(CustomerDemand.customer)).order_by(CustomerDemand.customer).all()
-    customers = [r[0] for r in customer_rows]
+    # Customers come from SalesHistory (uploaded actuals with customer field)
+    # merged with any customers in CustomerDemand (forecast-only records).
+    sh_customers = [
+        r[0] for r in db.query(distinct(SalesHistory.customer))
+        .filter(SalesHistory.customer.isnot(None))
+        .order_by(SalesHistory.customer).all()
+    ]
+    cd_customers = [
+        r[0] for r in db.query(distinct(CustomerDemand.customer))
+        .order_by(CustomerDemand.customer).all()
+    ]
+    customers = sorted(set(sh_customers) | set(cd_customers))
 
-    # Fetch customer actuals
-    actuals = db.query(CustomerDemand).filter(
+    # Actuals come from SalesHistory (where customer is set)
+    sh_actuals = db.query(SalesHistory).filter(
+        SalesHistory.customer.isnot(None),
+        SalesHistory.period_date >= from_date,
+        SalesHistory.period_date <= today,
+    ).all()
+    actuals_map: dict[tuple, float] = {}  # (product_id, customer, period_key) -> qty
+    for a in sh_actuals:
+        pk = _period_key(a.period_date, granularity)
+        key = (a.product_id, a.customer, pk)
+        actuals_map[key] = actuals_map.get(key, 0) + a.quantity
+
+    # Also merge any actuals stored directly in CustomerDemand
+    cd_actuals = db.query(CustomerDemand).filter(
         CustomerDemand.source == "actual",
         CustomerDemand.period_date >= from_date,
         CustomerDemand.period_date <= today,
     ).all()
-    actuals_map: dict[tuple, float] = {}  # (product_id, customer, period_key) -> qty
-    for a in actuals:
+    for a in cd_actuals:
         pk = _period_key(a.period_date, granularity)
         key = (a.product_id, a.customer, pk)
         actuals_map[key] = actuals_map.get(key, 0) + a.quantity
@@ -224,16 +496,22 @@ def _pivot_by_customer(products, periods, from_date, to_date, today, granularity
     # Fetch customer forecasts
     forecasts = db.query(CustomerDemand).filter(
         CustomerDemand.source == "forecast",
-        CustomerDemand.period_date > today,
+        CustomerDemand.period_date >= today.replace(day=1),
         CustomerDemand.period_date <= to_date,
     ).all()
     forecast_map: dict[tuple, float] = {}  # (product_id, customer, period_key) -> qty
+    adjusted_map: dict[tuple, bool] = {}   # (product_id, customer, period_key) -> is_adjusted
+    note_map: dict[tuple, str | None] = {} # (product_id, customer, period_key) -> note
     for f in forecasts:
         pk = _period_key(f.period_date, granularity)
         key = (f.product_id, f.customer, pk)
         forecast_map[key] = forecast_map.get(key, 0) + f.quantity
+        if f.is_adjusted:
+            adjusted_map[key] = True
+            note_map[key] = f.note
 
-    product_map = {p.id: p for p in products}
+    priority_set = {(r.customer, r.product_id) for r in db.query(CustomerPriority).all()}
+
     rows = []
     for p in products:
         for customer in customers:
@@ -241,11 +519,15 @@ def _pivot_by_customer(products, periods, from_date, to_date, today, granularity
                 "product_id": p.id, "sku": p.sku, "description": p.description,
                 "abc_class": p.abc_class, "customer": customer,
                 "lead_time_days": p.lead_time_days, "safety_stock_qty": p.safety_stock_qty,
+                "is_priority": (customer, p.id) in priority_set,
             }
             for period in periods:
                 pk = period["key"]
                 if period["is_future"]:
-                    row[f"f_{pk}"] = forecast_map.get((p.id, customer, pk))
+                    key = (p.id, customer, pk)
+                    row[f"f_{pk}"] = forecast_map.get(key)
+                    row[f"fa_{pk}"] = adjusted_map.get(key, False)
+                    row[f"fn_{pk}"] = note_map.get(key)
                 else:
                     row[f"a_{pk}"] = actuals_map.get((p.id, customer, pk))
             rows.append(row)
@@ -261,8 +543,8 @@ def _period_key(d: date, granularity: str) -> str:
     return f"{iso[0]}-W{iso[1]:02d}"
 
 
-def _generate_periods(from_date: date, to_date: date, granularity: str) -> list[dict]:
-    today = date.today()
+def _generate_periods(from_date: date, to_date: date, granularity: str, perspective_date: date = None) -> list[dict]:
+    today = perspective_date or date.today()
     current_period_key = _period_key(today, granularity)
     periods = []
     current = from_date

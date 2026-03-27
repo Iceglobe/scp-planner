@@ -62,8 +62,26 @@ export const adjustForecast = (id: number, adjustedQty: number, adjustedBy = 'us
 export const adjustForecastMonth = (body: { product_id: number; year_month: string; total_qty: number; run_id?: string }) =>
   api.put('/forecasts/adjust-month', body).then(r => r.data)
 
+export const setForecastNote = (id: number, note: string | null) =>
+  api.patch(`/forecasts/${id}/note`, { note }).then(r => r.data)
+
 export const reforecastProduct = (body: { product_id: number; model: string; periods?: number; granularity?: string }) =>
   api.post('/forecasts/run-product', body).then(r => r.data)
+
+export const adjustCustomerForecast = (body: { product_id: number; customer: string; year_month: string; qty: number }) =>
+  api.put('/demand/customer-forecast/adjust', body).then(r => r.data)
+
+export const revertForecastMonth = (body: { product_id: number; year_month: string; run_id?: string }) =>
+  api.delete('/forecasts/adjust-month', { data: body }).then(r => r.data)
+
+export const revertCustomerForecast = (body: { product_id: number; customer: string; year_month: string }) =>
+  api.delete('/demand/customer-forecast/adjust', { data: body }).then(r => r.data)
+
+export const saveCustomerForecastNote = (body: { product_id: number; customer: string; year_month: string; note: string | null }) =>
+  api.patch('/demand/customer-forecast/note', body).then(r => r.data)
+
+export const toggleCustomerPriority = (customer: string, product_id: number) =>
+  api.post('/demand/priority/toggle', { customer, product_id }).then(r => r.data)
 
 export const getAdjustmentLog = (productId?: number) =>
   api.get('/forecasts/adjustment-log', { params: productId ? { product_id: productId } : {} }).then(r => r.data)
@@ -71,8 +89,8 @@ export const getAdjustmentLog = (productId?: number) =>
 export const saveForecastRun = (runId: string, name: string) =>
   api.put(`/forecasts/runs/${runId}/save`, { name }).then(r => r.data)
 
-export const getForecastAccuracy = (lagWeeks: number, runId?: string) =>
-  api.get('/forecasts/accuracy', { params: { lag_weeks: lagWeeks, ...(runId ? { run_id: runId } : {}) } }).then(r => r.data)
+export const getForecastAccuracy = (lagWeeks: number, runId?: string, period?: string) =>
+  api.get('/forecasts/accuracy', { params: { lag_weeks: lagWeeks, ...(runId ? { run_id: runId } : {}), ...(period ? { period } : {}) } }).then(r => r.data)
 
 // Inventory
 export const getInventory = () => api.get('/inventory').then(r => r.data)
@@ -99,7 +117,7 @@ export const confirmAllPos = (mrpRunId?: string, dueDateFrom?: string, dueDateTo
     },
   }).then(r => r.data)
 
-export const runMrp = (body: { horizon_weeks: number; forecast_run_id?: string; consolidation?: string }) =>
+export const runMrp = (body: { horizon_weeks: number; forecast_run_id?: string; consolidation?: string; health_target_multiplier?: number; min_weeks_cover?: number }) =>
   api.post('/supply/mrp/run', body).then(r => r.data)
 
 export const getMrpRuns = (): Promise<MrpRun[]> =>
@@ -140,6 +158,53 @@ export const refreshEntityFile = (entity: string) =>
 
 export const fetchExcel = (body: { url: string; target_entity: string; column_mapping?: Record<string, string>; import_mode?: string }) =>
   api.post('/connectors/fetch-excel', body, { timeout: 90000 }).then(r => r.data)
+
+// Agent
+export const runAgent = () => api.post('/agent/run', null, { timeout: 120000 }).then(r => r.data)
+export const executeAgentAction = (action_type: string, params: Record<string, unknown>) =>
+  api.post('/agent/execute', { action_type, params }).then(r => r.data)
+
+// Workstations
+export const getWorkstations = () =>
+  api.get('/workstations').then(r => r.data)
+
+export const createWorkstation = (body: Record<string, unknown>) =>
+  api.post('/workstations', body).then(r => r.data)
+
+export const updateWorkstation = (id: number, body: Record<string, unknown>) =>
+  api.put(`/workstations/${id}`, body).then(r => r.data)
+
+export const deleteWorkstation = (id: number) =>
+  api.delete(`/workstations/${id}`).then(r => r.data)
+
+// Workstation Flows
+export const getFlows = () =>
+  api.get('/workstations/flows').then(r => r.data)
+
+export const createFlow = (body: { name: string; workstation_ids: number[] }) =>
+  api.post('/workstations/flows', body).then(r => r.data)
+
+export const updateFlow = (id: number, body: { name?: string; workstation_ids?: number[] }) =>
+  api.put(`/workstations/flows/${id}`, body).then(r => r.data)
+
+export const deleteFlow = (id: number) =>
+  api.delete(`/workstations/flows/${id}`).then(r => r.data)
+
+// Value Stream
+export const getValueStreamLoad = (params?: {
+  horizon_weeks?: number
+  threshold_pct?: number
+  mrp_run_id?: string
+}) =>
+  api.get('/value-stream/load', { params }).then(r => r.data)
+
+export const simulateValueStream = (body: {
+  mrp_run_id?: string
+  horizon_weeks?: number
+  threshold_pct?: number
+  hours_per_day_overrides: Record<number, number>
+}) =>
+  api.post('/value-stream/simulate', body).then(r => r.data)
 
 // BOM
 export const getBomTree = () => api.get('/bom/tree').then(r => r.data)

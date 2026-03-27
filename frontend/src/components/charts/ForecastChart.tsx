@@ -13,10 +13,11 @@ interface DataPoint {
   safety_stock?: number
 }
 
-function ChartTooltip({ active, payload, label }: TooltipProps<number, string>) {
+function ChartTooltip({ active, payload, label, valueFormatter }: TooltipProps<number, string> & { valueFormatter?: (v: number) => string }) {
   if (!active || !payload?.length) return null
   const entries = payload.filter(p => p.dataKey !== 'upper' && p.dataKey !== 'lower' && p.value != null)
   if (!entries.length) return null
+  const fmt = valueFormatter ?? fmtNumber
   return (
     <div style={{ background: 'rgba(0,0,0,0.72)', border: '1px solid rgba(255,255,255,0.1)', backdropFilter: 'blur(16px)' }} className="rounded-xl shadow-2xl px-3.5 py-2.5 min-w-[130px]">
       <p className="text-[10px] uppercase tracking-widest mb-2" style={{ color: 'rgba(255,255,255,0.4)', letterSpacing: '0.12em' }}>{label}</p>
@@ -26,7 +27,7 @@ function ChartTooltip({ active, payload, label }: TooltipProps<number, string>) 
             <span className="w-1.5 h-1.5 rounded-full inline-block shrink-0" style={{ background: p.color }} />
             {p.name}
           </span>
-          <span className="font-semibold" style={{ color: 'rgba(255,255,255,0.95)' }}>{fmtNumber(p.value as number)}</span>
+          <span className="font-semibold" style={{ color: 'rgba(255,255,255,0.95)' }}>{fmt(p.value as number)}</span>
         </div>
       ))}
     </div>
@@ -34,10 +35,11 @@ function ChartTooltip({ active, payload, label }: TooltipProps<number, string>) 
 }
 
 export function ForecastChart({
-  data, title,
+  data, title, valueFormatter,
 }: {
-  data: DataPoint[]; title?: string;
+  data: DataPoint[]; title?: string; valueFormatter?: (v: number) => string;
 }) {
+  const fmt = valueFormatter ?? fmtNumber
   return (
     <div>
       {title && <p className="text-[11px] font-medium uppercase tracking-widest text-white/60 mb-3">{title}</p>}
@@ -56,8 +58,8 @@ export function ForecastChart({
 
           <XAxis dataKey="label" tick={{ fontSize: 10, fill: 'rgba(255,255,255,0.3)' }} tickLine={false} axisLine={false} interval="preserveStartEnd" />
           <YAxis tick={{ fontSize: 10, fill: 'rgba(255,255,255,0.3)' }} tickLine={false} axisLine={false}
-            tickFormatter={v => fmtNumber(v)} width={45} />
-          <Tooltip content={<ChartTooltip />} cursor={{ fill: 'rgba(255,255,255,0.03)' }} />
+            tickFormatter={v => fmt(v)} width={valueFormatter ? 75 : 45} />
+          <Tooltip content={<ChartTooltip valueFormatter={fmt} />} cursor={{ fill: 'rgba(255,255,255,0.03)' }} />
           <Legend
             wrapperStyle={{ fontSize: 10, paddingTop: 14 }}
             formatter={(value) => <span style={{ color: 'rgba(255,255,255,0.8)', letterSpacing: '0.05em' }}>{value}</span>}
@@ -69,7 +71,12 @@ export function ForecastChart({
 
           {/* Actuals — gradient bars */}
           <Bar dataKey="actual" name="Actual" fill="url(#barGrad)"
-            radius={[2, 2, 0, 0]} barSize={10} />
+            radius={[2, 2, 0, 0]} barSize={12} />
+
+          {/* Actuals — subtle line connecting bar tops */}
+          <Line dataKey="actual" name="Actual" stroke="rgba(52,211,153,0.35)" strokeWidth={1.5}
+            type="linear" dot={false} activeDot={false}
+            connectNulls={false} legendType="none" />
 
           {/* Forecast — dashed mint line */}
           <Line dataKey="forecast" name="Forecast" stroke="rgba(110,231,183,0.7)" strokeWidth={1.5}

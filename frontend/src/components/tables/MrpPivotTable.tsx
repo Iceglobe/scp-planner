@@ -1,20 +1,28 @@
-import { useMemo, useCallback, createElement, useRef } from 'react'
+import React, { useMemo, useCallback, createElement, useRef, useState, useEffect } from 'react'
 import { AgGridReact } from 'ag-grid-react'
-import { ColDef, ColGroupDef, FirstDataRenderedEvent, RowClassParams, CellDoubleClickedEvent, CellClickedEvent, CellValueChangedEvent } from 'ag-grid-community'
+import { ColDef, ColGroupDef, FirstDataRenderedEvent, RowClassParams, CellDoubleClickedEvent, CellClickedEvent, CellValueChangedEvent, GridReadyEvent, GridApi } from 'ag-grid-community'
 import 'ag-grid-community/styles/ag-grid.css'
 import 'ag-grid-community/styles/ag-theme-alpine.css'
 import type { MrpPivotData, MrpRow } from '../../api/types'
 import { abcCellRenderer } from './cellRenderers'
+import { fmtCurrency } from '../../utils/formatters'
 
 type RowType = MrpRow['row_type']
 
 interface Props {
   data: MrpPivotData
+  viewUnit?: 'qty' | 'currency'
   onCellDoubleClick?: (rowType: RowType, productId: number, periodKey: string) => void
   onProductDoubleClick?: (productId: number, sku: string, description: string) => void
   onPeriodClick?: (periodKey: string, periodLabel: string, periodDate: string) => void
   onSuggestedPoClick?: (poIds: number[], productId: number) => void
   onSuggestedPoEdit?: (productId: number, periodKey: string, newQty: number, poIds: number[]) => void
+  maxHeight?: number
+}
+
+function getPrice(data: MrpRow, viewUnit: 'qty' | 'currency'): number {
+  if (viewUnit !== 'currency') return 1
+  return (data.unit_cost as number) || 0
 }
 
 const ROW_LABELS: Record<RowType, string> = {
@@ -27,12 +35,12 @@ const ROW_LABELS: Record<RowType, string> = {
 }
 
 const ROW_COLORS: Record<RowType, string> = {
-  on_hand: '#374151',
-  customer_orders: '#b45309',
-  forecast: '#dc2626',
-  confirmed_po: '#059669',
-  suggested_po: '#7c3aed',
-  ending_inv: '#1e40af',
+  on_hand: '#8fb5c7',
+  customer_orders: '#208663',
+  forecast: '#2aae81',
+  confirmed_po: '#3b7386',
+  suggested_po: '#6aaac0',
+  ending_inv: '#7a90a4',
 }
 
 const ROW_BG: Record<RowType, string> = {
@@ -41,17 +49,18 @@ const ROW_BG: Record<RowType, string> = {
   forecast: 'transparent',
   confirmed_po: 'transparent',
   suggested_po: 'transparent',
-  ending_inv: 'rgba(96,165,250,0.08)',
+  ending_inv: 'rgba(148,163,184,0.06)',
 }
 
 // Which row types show value even when 0
 const ALWAYS_SHOW: Set<RowType> = new Set(['on_hand', 'ending_inv'])
 
-function fmtVal(v: unknown, rt: RowType): string {
+function fmtVal(v: unknown, rt: RowType, price: number, viewUnit: 'qty' | 'currency'): string {
   if (v == null || v === '') return '—'
   const n = Number(v)
   if (isNaN(n)) return '—'
   if (!ALWAYS_SHOW.has(rt) && n === 0) return '—'
+  if (viewUnit === 'currency') return fmtCurrency(n * price)
   return String(Math.round(n))
 }
 
@@ -59,9 +68,75 @@ function headerOnlyCell(p: { data: MrpRow; value: unknown }, render: (val: unkno
   return p.data.row_type === 'on_hand' ? render(p.value) : null
 }
 
-export function MrpPivotTable({ data, onCellDoubleClick, onProductDoubleClick, onPeriodClick, onSuggestedPoClick, onSuggestedPoEdit }: Props) {
+type SortState = { field: string | null; dir: 'asc' | 'desc' }
+
+function SortableHeader({ displayName, field, sortStateRef, onSort }: {
+  displayName: string; field: string
+  sortStateRef: React.MutableRefObject<SortState>
+  onSort: (f: string) => void
+}) {
+  const active = sortStateRef.current.field === field
+  const dir = sortStateRef.current.dir
+  return (
+    <div onClick={() => onSort(field)} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, cursor: 'pointer', width: '100%', height: '100%' }}>
+      <span>{displayName}</span>
+      <span style={{ fontSize: 9, opacity: active ? 1 : 0.35 }}>
+        {active ? (dir === 'asc' ? '▲' : '▼') : '⇅'}
+      </span>
+    </div>
+  )
+}
+
+export function MrpPivotTable({ data, viewUnit = 'qty', onCellDoubleClick, onProductDoubleClick, onPeriodClick, onSuggestedPoClick, onSuggestedPoEdit, maxHeight }: Props) {
   const { periods, rows } = data
   const clickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const gridApiRef = useRef<GridApi | null>(null)
+  const [sortField, setSortField] = useState<string | null>(null)
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc')
+  // Mutable ref so headers can read current sort without columnDefs being recreated
+  const sortStateRef = useRef<SortState>({ field: null, dir: 'asc' })
+  sortStateRef.current = { field: sortField, dir: sortDir }
+
+  // Auto-size all columns whenever viewUnit changes (currency values need wider cols)
+  useEffect(() => {
+    const t = setTimeout(() => { gridApiRef.current?.autoSizeAllColumns() }, 50)
+    return () => clearTimeout(t)
+  }, [viewUnit])
+
+  // Refresh headers when sort changes — without recreating columnDefs (avoids width reset)
+  useEffect(() => {
+    gridApiRef.current?.refreshHeader()
+  }, [sortField, sortDir])
+
+  const onGridReady = useCallback((e: GridReadyEvent) => {
+    gridApiRef.current = e.api
+  }, [])
+
+  // Sort product groups by the on_hand row's value for the active sort field
+  const sortedRows = useMemo(() => {
+    if (!sortField) return rows
+    const pidVals = rows
+      .filter(r => r.row_type === 'on_hand')
+      .map(r => ({ pid: r.product_id, val: (r as unknown as Record<string, unknown>)[sortField] ?? null }))
+    pidVals.sort((a, b) => {
+      if (a.val == null && b.val == null) return 0
+      if (a.val == null) return 1
+      if (b.val == null) return -1
+      const av = typeof a.val === 'string' ? a.val.toLowerCase() : (a.val as number)
+      const bv = typeof b.val === 'string' ? b.val.toLowerCase() : (b.val as number)
+      if (av < bv) return sortDir === 'asc' ? -1 : 1
+      if (av > bv) return sortDir === 'asc' ? 1 : -1
+      return 0
+    })
+    return pidVals.flatMap(({ pid }) => rows.filter(r => r.product_id === pid))
+  }, [rows, sortField, sortDir])
+
+  const handleSortClick = useCallback((field: string) => {
+    setSortField(prev => {
+      if (prev === field) { setSortDir(d => d === 'asc' ? 'desc' : 'asc'); return prev }
+      setSortDir('asc'); return field
+    })
+  }, [])
 
   const columnDefs = useMemo((): (ColDef | ColGroupDef)[] => {
 
@@ -105,6 +180,8 @@ export function MrpPivotTable({ data, onCellDoubleClick, onProductDoubleClick, o
     const abcCol: ColDef = {
       field: 'abc_class',
       headerName: 'ABC',
+      headerComponent: SortableHeader,
+      headerComponentParams: { field: 'abc_class', sortStateRef, onSort: handleSortClick },
       pinned: 'left',
       width: 52,
       cellRenderer: (p: { data: MrpRow; value: string }) =>
@@ -114,20 +191,27 @@ export function MrpPivotTable({ data, onCellDoubleClick, onProductDoubleClick, o
     const onHandCol: ColDef = {
       field: 'on_hand_today',
       headerName: 'On Hand',
+      headerComponent: SortableHeader,
+      headerComponentParams: { field: 'on_hand_today', sortStateRef, onSort: handleSortClick },
       pinned: 'left',
       width: 78,
       type: 'numericColumn',
       cellRenderer: (p: { data: MrpRow; value: number }) =>
-        headerOnlyCell(p, v =>
-          createElement('span', {
-            style: { fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.9)' }
-          }, v != null ? String(Math.round(v as number)) : '—')
-        ),
+        headerOnlyCell(p, v => {
+          if (v == null) return createElement('span', { style: { fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.9)' } }, '—')
+          const n = v as number
+          const displayed = viewUnit === 'currency'
+            ? fmtCurrency(n * ((p.data.unit_cost as number) || 0))
+            : String(Math.round(n))
+          return createElement('span', { style: { fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.9)' } }, displayed)
+        }),
     }
 
     const leadTimeCol: ColDef = {
       field: 'lead_time_days',
       headerName: 'LT (d)',
+      headerComponent: SortableHeader,
+      headerComponentParams: { field: 'lead_time_days', sortStateRef, onSort: handleSortClick },
       pinned: 'left',
       width: 62,
       type: 'numericColumn',
@@ -142,6 +226,8 @@ export function MrpPivotTable({ data, onCellDoubleClick, onProductDoubleClick, o
     const ssCol: ColDef = {
       field: 'safety_stock',
       headerName: 'SS',
+      headerComponent: SortableHeader,
+      headerComponentParams: { field: 'safety_stock', sortStateRef, onSort: handleSortClick },
       pinned: 'left',
       width: 62,
       type: 'numericColumn',
@@ -156,6 +242,8 @@ export function MrpPivotTable({ data, onCellDoubleClick, onProductDoubleClick, o
     const moqCol: ColDef = {
       field: 'moq',
       headerName: 'MOQ',
+      headerComponent: SortableHeader,
+      headerComponentParams: { field: 'moq', sortStateRef, onSort: handleSortClick },
       pinned: 'left',
       width: 62,
       type: 'numericColumn',
@@ -170,6 +258,8 @@ export function MrpPivotTable({ data, onCellDoubleClick, onProductDoubleClick, o
     const maxCapCol: ColDef = {
       field: 'max_weekly_capacity',
       headerName: 'Max Cap',
+      headerComponent: SortableHeader,
+      headerComponentParams: { field: 'max_weekly_capacity', sortStateRef, onSort: handleSortClick },
       headerTooltip: 'Max weekly capacity',
       pinned: 'left',
       width: 72,
@@ -202,8 +292,8 @@ export function MrpPivotTable({ data, onCellDoubleClick, onProductDoubleClick, o
         headerName: period.label,
         width: 68,
         type: 'numericColumn',
-        // All suggested_po cells are editable — zero cells create a new PO
-        editable: (p) => p.data?.row_type === 'suggested_po',
+        // suggested_po cells are editable in qty mode only
+        editable: (p) => viewUnit === 'qty' && p.data?.row_type === 'suggested_po',
         singleClickEdit: false,
         valueSetter: (p) => {
           const n = Number(p.newValue)
@@ -211,7 +301,10 @@ export function MrpPivotTable({ data, onCellDoubleClick, onProductDoubleClick, o
           p.data[p.colDef.field!] = n
           return true
         },
-        valueFormatter: (p: { value: unknown; data: MrpRow }) => fmtVal(p.value, p.data?.row_type),
+        valueFormatter: (p: { value: unknown; data: MrpRow }) => {
+          const rt = p.data?.row_type
+          return fmtVal(p.value, rt, getPrice(p.data, viewUnit), viewUnit)
+        },
         cellStyle: (p: { value: unknown; data: MrpRow }): Record<string, string | number> => {
           const rt = p.data?.row_type
           const val = Number(p.value)
@@ -227,14 +320,14 @@ export function MrpPivotTable({ data, onCellDoubleClick, onProductDoubleClick, o
           }
           if (rt === 'on_hand') return { ...base, color: 'rgba(255,255,255,0.9)', fontWeight: 600 }
           if (rt === 'customer_orders') return val > 0
-            ? { ...base, color: '#fcd34d', fontWeight: 700, cursor: 'pointer', textDecoration: 'underline dotted' }
+            ? { ...base, color: '#34c98e', fontWeight: 700, cursor: 'pointer', textDecoration: 'underline dotted' }
             : { ...base, color: 'rgba(255,255,255,0.25)' }
-          if (rt === 'forecast') return { ...base, color: '#fca5a5' }
+          if (rt === 'forecast') return { ...base, color: ROW_COLORS.forecast }
           if (rt === 'confirmed_po') return val > 0
-            ? { ...base, color: '#6ee7b7', fontWeight: 700, cursor: 'pointer', textDecoration: 'underline dotted' }
+            ? { ...base, color: '#5aadc4', fontWeight: 700, cursor: 'pointer', textDecoration: 'underline dotted' }
             : { ...base, color: 'rgba(255,255,255,0.25)' }
           if (rt === 'suggested_po') return val > 0
-            ? { ...base, color: '#c4b5fd', fontWeight: 700, cursor: 'cell', textDecoration: 'underline dotted' }
+            ? { ...base, color: ROW_COLORS.suggested_po, fontWeight: 700, cursor: 'cell', textDecoration: 'underline dotted' }
             : { ...base, color: 'rgba(255,255,255,0.25)', cursor: 'cell' }
           return base
         },
@@ -250,7 +343,7 @@ export function MrpPivotTable({ data, onCellDoubleClick, onProductDoubleClick, o
     }))
 
     return [labelCol, abcCol, onHandCol, leadTimeCol, ssCol, moqCol, maxCapCol, ...groupedCols]
-  }, [periods])
+  }, [periods, viewUnit])
 
   const defaultColDef = useMemo<ColDef>(() => ({
     sortable: false,
@@ -278,6 +371,11 @@ export function MrpPivotTable({ data, onCellDoubleClick, onProductDoubleClick, o
     const rt = e.data?.row_type
     const val = Number(e.value)
     const field = e.colDef.field || ''
+
+    if (rt === 'on_hand' && onProductDoubleClick) {
+      onProductDoubleClick(e.data!.product_id, e.data!.sku ?? '', e.data!.description ?? '')
+      return
+    }
 
     if (rt === 'suggested_po') {
       // Zero cells: let double-click handle creation; single click does nothing
@@ -318,10 +416,6 @@ export function MrpPivotTable({ data, onCellDoubleClick, onProductDoubleClick, o
     }
 
     const rt = e.data?.row_type
-    if (rt === 'on_hand' && onProductDoubleClick) {
-      onProductDoubleClick(e.data!.product_id, e.data!.sku ?? '', e.data!.description ?? '')
-      return
-    }
     // suggested_po: AG Grid handles inline editing on double-click
     if (rt === 'suggested_po') return
     if (!onCellDoubleClick) return
@@ -331,17 +425,18 @@ export function MrpPivotTable({ data, onCellDoubleClick, onProductDoubleClick, o
     onCellDoubleClick(rt, e.data!.product_id, e.colDef.field || '')
   }, [onCellDoubleClick, onProductDoubleClick])
 
-  const height = Math.min(rows.length * 28 + 80, 720)
+  const height = Math.min(rows.length * 28 + 80, maxHeight ?? 720)
 
   return (
     <div className="ag-theme-alpine w-full" style={{ height }}>
       <AgGridReact
-        rowData={rows}
+        rowData={sortedRows}
         columnDefs={columnDefs}
         defaultColDef={defaultColDef}
         getRowStyle={getRowStyle}
         getRowHeight={getRowHeight}
         getRowId={(params: { data: MrpRow }) => `${params.data.product_id}_${params.data.row_type}`}
+        onGridReady={onGridReady}
         onFirstDataRendered={onFirstDataRendered}
         onCellClicked={onCellClicked}
         onCellDoubleClicked={onCellDoubleClicked}

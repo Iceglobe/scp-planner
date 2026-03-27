@@ -1,8 +1,8 @@
-import { NavLink } from 'react-router-dom'
+import { NavLink, useLocation } from 'react-router-dom'
 import { useEffect, useState } from 'react'
 import {
   LayoutDashboard, Package, TrendingUp, ShoppingCart,
-  Warehouse, Database,
+  Warehouse, Database, GitBranch, GitMerge,
 } from 'lucide-react'
 import { useSidebarActions } from '../../context/SidebarActionsContext'
 import { useFilters } from '../../context/FilterContext'
@@ -12,14 +12,18 @@ const nav = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard },
   { to: '/demand-planning', label: 'Demand Planning', icon: TrendingUp },
   { to: '/supply-planning', label: 'Supply Planning', icon: ShoppingCart },
+  { to: '/value-stream', label: 'Value Stream', icon: GitMerge },
   { to: '/inventory', label: 'Inventory', icon: Warehouse },
   { to: '/master-data', label: 'Master Data', icon: Package },
+  { to: '/bom', label: 'Bill of Materials', icon: GitBranch },
   { to: '/data-sources', label: 'Data Sources', icon: Database },
 ]
 
 export function Sidebar() {
   const { actions } = useSidebarActions()
   const { itemIds, setItemIds, productNames, setProductNames } = useFilters()
+  const location = useLocation()
+  const isDashboard = location.pathname === '/'
   const [skuOptions, setSkuOptions] = useState<string[]>([])
   const [nameOptions, setNameOptions] = useState<string[]>([])
 
@@ -71,25 +75,29 @@ export function Sidebar() {
         ))}
       </nav>
 
-      {/* Global filters */}
-      <div className="mx-4 mt-4 border-t border-white/5" />
-      <div className="px-5 pt-4 pb-2 flex flex-col items-start">
-        <p className="w-3/4 text-[9px] font-bold uppercase tracking-widest text-white/70 mb-2">Filters</p>
-        <div className="w-full flex flex-col items-start gap-1.5">
-          <MultiSelect
-            options={skuOptions}
-            value={itemIds}
-            onChange={setItemIds}
-            placeholder="Item ID…"
-          />
-          <MultiSelect
-            options={nameOptions}
-            value={productNames}
-            onChange={setProductNames}
-            placeholder="Product name…"
-          />
-        </div>
-      </div>
+      {/* Global filters — hidden on dashboard */}
+      {!isDashboard && (
+        <>
+          <div className="mx-4 mt-4 border-t border-white/5" />
+          <div className="px-5 pt-4 pb-2 flex flex-col items-start">
+            <p className="w-3/4 text-[9px] font-bold uppercase tracking-widest text-white/70 mb-2">Filters</p>
+            <div className="w-full flex flex-col items-start gap-1.5">
+              <MultiSelect
+                options={skuOptions}
+                value={itemIds}
+                onChange={setItemIds}
+                placeholder="Item ID…"
+              />
+              <MultiSelect
+                options={nameOptions}
+                value={productNames}
+                onChange={setProductNames}
+                placeholder="Product name…"
+              />
+            </div>
+          </div>
+        </>
+      )}
 
       {/* Contextual page actions */}
       {actions && (

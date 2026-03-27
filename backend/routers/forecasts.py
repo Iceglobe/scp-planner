@@ -5,7 +5,7 @@ from typing import Optional
 from datetime import date, timedelta, datetime
 import uuid, statistics
 from database import get_db
-from models import Product, SalesHistory, Forecast, ForecastRun, ForecastAdjustLog
+from models import Product, SalesHistory, Forecast, ForecastRun, ForecastAdjustLog, CustomerDemand
 from algorithms.forecast_models import MODEL_FUNCTIONS, select_best_model, evaluate_forecast, confidence_bounds
 
 router = APIRouter()
@@ -16,6 +16,7 @@ class ForecastRunRequest(BaseModel):
     model: str = "AUTO"
     periods: int = 12
     granularity: str = "week"
+    as_of_date: Optional[str] = None  # "YYYY-MM-DD" — treat this date as "today" for historical runs
 
 
 class ProductReforecastRequest(BaseModel):
@@ -28,84 +29,129 @@ class ProductReforecastRequest(BaseModel):
 class AdjustRequest(BaseModel):
     adjusted_qty: float
     adjusted_by: str = "user"
+    note: Optional[str] = None
 
 
-def _run_product_forecast(p: Product, model_name: str, periods: int, granularity: str,
-                          run_id: str, today: date, db: Session,
-                          prior_adjustments: dict = None):
-    """Forecast a single product and write Forecast rows. Returns (mape, test_actuals, test_preds)."""
-    # Exclude the current (incomplete) week so partial data doesn't drag models down
-    current_week_start = today - timedelta(days=today.weekday())
-    hist_rows = sorted(
-        db.query(SalesHistory).filter(
-            SalesHistory.product_id == p.id,
-            SalesHistory.period_date < current_week_start,
-        ).all(),
-        key=lambda r: r.period_date,
-    )
-    history = [r.quantity for r in hist_rows]
-    # Drop the last period if it looks like a partial week (< 30% of the mean of
-    # the preceding periods). Happens when data is imported mid-week.
+def _monthly_periods(current_month_start: date, n: int) -> list[date]:
+    """Return the 1st-of-month dates for n months starting from current_month_start."""
+    out = []
+    for i in range(n):
+        year = current_month_start.year + (current_month_start.month - 1 + i) // 12
+        month = (current_month_start.month - 1 + i) % 12 + 1
+        out.append(date(year, month, 1))
+    return out
+
+
+def _aggregate_monthly(rows, key_fn) -> dict[str, float]:
+    """Aggregate rows into {YYYY-MM: total_qty} using key_fn(row) -> period_date."""
+    totals: dict[str, float] = {}
+    for r in rows:
+        k = key_fn(r).strftime("%Y-%m")
+        totals[k] = totals.get(k, 0) + r.quantity
+    return totals
+
+
+def _trim_history(history: list[float]) -> list[float]:
     if len(history) >= 4:
         mean_prior = sum(history[:-1]) / len(history[:-1])
         if mean_prior > 0 and history[-1] < 0.30 * mean_prior:
-            history = history[:-1]
-    if not history:
-        # No sales data — fall back to avg_daily_demand from inventory, else flat zero
+            return history[:-1]
+    return history
+
+
+def _run_product_forecast(p: Product, model_name: str, periods: int, granularity: str,
+                          run_id: str, today: date, db: Session):
+    """Forecast a single product per customer. Stores monthly rows in CustomerDemand
+    (source='forecast') and aggregates into the Forecast table for MRP."""
+    current_month_start = today.replace(day=1)
+    period_dates = _monthly_periods(current_month_start, periods)
+
+    hist_rows = db.query(SalesHistory).filter(
+        SalesHistory.product_id == p.id,
+        SalesHistory.period_date < current_month_start,
+    ).all()
+
+    # Separate history by customer
+    by_customer: dict[str, list] = {}
+    agg_rows = []
+    for r in hist_rows:
+        if r.customer:
+            by_customer.setdefault(r.customer, []).append(r)
+        agg_rows.append(r)
+
+    # Overall aggregate history (all customers combined) for model selection + fallback
+    agg_monthly = _aggregate_monthly(agg_rows, lambda r: r.period_date)
+    agg_history = _trim_history([v for _, v in sorted(agg_monthly.items())])
+
+    if not agg_history:
         from models import Inventory as _Inv
         inv = db.query(_Inv).filter(_Inv.product_id == p.id).first()
-        avg_weekly = round((inv.avg_daily_demand or 0) * 7, 2) if inv else 0.0
-        history = [avg_weekly] * 4  # minimal seed so model has something to project
+        avg_monthly = round((inv.avg_daily_demand or 0) * 30.5, 2) if inv else 0.0
+        agg_history = [avg_monthly] * 4
 
-    chosen_model = model_name if model_name != "AUTO" else select_best_model(history)
+    chosen_model = model_name if model_name != "AUTO" else select_best_model(agg_history)
     fn = MODEL_FUNCTIONS.get(chosen_model, MODEL_FUNCTIONS["SMA"])
 
+    # MAPE on aggregate history
     mape = None
     test_actuals: list[float] = []
     test_preds: list[float] = []
-    if len(history) >= 8:
-        train, test = history[:-4], history[-4:]
+    if len(agg_history) >= 8:
+        train, test = agg_history[:-4], agg_history[-4:]
         preds = fn(train, periods=4)
         metrics = evaluate_forecast(test, preds)
         mape = metrics.get("mape")
         test_actuals = list(test)
         test_preds = list(preds)
 
-    std_dev = statistics.stdev(history[-12:]) if len(history) >= 2 else 0
-    # Always generate weekly forecast rows — the pivot layer aggregates into months.
-    # periods is always expressed in months, so convert to weeks.
-    weekly_periods = periods * 4
-    forecasts_out = fn(history, periods=weekly_periods)
+    agg_std_dev = statistics.stdev(agg_history[-12:]) if len(agg_history) >= 2 else 0
 
-    for i, qty in enumerate(forecasts_out):
-        period_dt = today + timedelta(weeks=i)  # i=0 → current week
+    # ── Per-customer forecasts → CustomerDemand ──────────────────────────────
+    # Each new run is a clean snapshot — delete all existing forecast rows and regenerate.
+    db.query(CustomerDemand).filter(
+        CustomerDemand.product_id == p.id,
+        CustomerDemand.source == "forecast",
+    ).delete(synchronize_session=False)
 
-        lb, ub = confidence_bounds(qty, std_dev)
+    # Maps period_date → aggregated qty across all customers (for Forecast table)
+    agg_by_period: dict[date, float] = {pd: 0.0 for pd in period_dates}
 
-        # Carry over prior adjustment for this product+period if any
-        prior = prior_adjustments.get((p.id, period_dt)) if prior_adjustments else None
+    if by_customer:
+        for customer, crows in by_customer.items():
+            cust_monthly = _aggregate_monthly(crows, lambda r: r.period_date)
+            cust_history = _trim_history([v for _, v in sorted(cust_monthly.items())])
+            if not cust_history:
+                cust_history = [0.0] * 4
+            cust_fn = MODEL_FUNCTIONS.get(chosen_model, MODEL_FUNCTIONS["SMA"])
+            cust_forecasts = cust_fn(cust_history, periods=periods)
+            for period_dt, qty in zip(period_dates, cust_forecasts):
+                qty = max(0.0, round(qty, 4))
+                db.add(CustomerDemand(
+                    product_id=p.id, customer=customer,
+                    period_date=period_dt, quantity=qty, source="forecast",
+                ))
+                agg_by_period[period_dt] = agg_by_period.get(period_dt, 0.0) + qty
+    else:
+        # No customer-level data — use aggregate forecast as the only figure
+        agg_forecasts = fn(agg_history, periods=periods)
+        for period_dt, qty in zip(period_dates, agg_forecasts):
+            agg_by_period[period_dt] = max(0.0, round(qty, 4))
 
+    # ── SKU-level Forecast rows (aggregate, used by MRP) ─────────────────────
+    agg_forecasts_list = [agg_by_period[pd] for pd in period_dates]
+    for period_dt, qty in zip(period_dates, agg_forecasts_list):
+        lb, ub = confidence_bounds(qty, agg_std_dev)
         existing = db.query(Forecast).filter(
             Forecast.product_id == p.id,
             Forecast.period_date == period_dt,
             Forecast.run_id == run_id,
         ).first()
         if not existing:
-            f = Forecast(
-                product_id=p.id,
-                run_id=run_id,
-                model=chosen_model,
-                period_date=period_dt,
-                forecast_qty=qty,
-                lower_bound=lb,
-                upper_bound=ub,
-            )
-            if prior:
-                f.is_adjusted = True
-                f.adjusted_qty = prior["adjusted_qty"]
-                f.adjusted_by = prior["adjusted_by"]
-                f.adjusted_at = prior["adjusted_at"]
-            db.add(f)
+            db.add(Forecast(
+                product_id=p.id, run_id=run_id, model=chosen_model,
+                period_date=period_dt, forecast_qty=qty,
+                lower_bound=lb, upper_bound=ub,
+            ))
 
     return mape, test_actuals, test_preds
 
@@ -113,35 +159,22 @@ def _run_product_forecast(p: Product, model_name: str, periods: int, granularity
 @router.post("/run")
 def run_forecast(body: ForecastRunRequest, db: Session = Depends(get_db)):
     run_id = str(uuid.uuid4())
-    today = date.today()
+    if body.as_of_date:
+        today = date.fromisoformat(body.as_of_date)
+    else:
+        today = date.today()
 
     products = db.query(Product).filter(Product.active == True)
     if body.product_ids:
         products = products.filter(Product.id.in_(body.product_ids))
     products = products.all()
 
-    # Collect prior adjustments: (product_id, period_date) -> {adjusted_qty, adjusted_by, adjusted_at}
-    prior_adj_rows = db.query(Forecast).filter(
-        Forecast.is_adjusted == True,
-        Forecast.period_date >= today,
-    ).all()
-    prior_adjustments: dict = {}
-    for f in prior_adj_rows:
-        key = (f.product_id, f.period_date)
-        # Keep the most recent adjustment per product+period
-        if key not in prior_adjustments or (f.adjusted_at and (prior_adjustments[key].get("adjusted_at") or datetime.min) < f.adjusted_at):
-            prior_adjustments[key] = {
-                "adjusted_qty": f.adjusted_qty,
-                "adjusted_by": f.adjusted_by,
-                "adjusted_at": f.adjusted_at,
-            }
-
     all_test_actuals: list[float] = []
     all_test_preds: list[float] = []
     for p in products:
         _, test_actuals, test_preds = _run_product_forecast(
             p, body.model, body.periods, body.granularity,
-            run_id, today, db, prior_adjustments,
+            run_id, today, db,
         )
         all_test_actuals.extend(test_actuals)
         all_test_preds.extend(test_preds)
@@ -184,24 +217,9 @@ def reforecast_product(body: ProductReforecastRequest, db: Session = Depends(get
     ).delete()
     db.flush()
 
-    # Carry over prior adjustments for this product
-    prior_adj_rows = db.query(Forecast).filter(
-        Forecast.product_id == body.product_id,
-        Forecast.is_adjusted == True,
-        Forecast.period_date >= today,
-    ).all()
-    prior_adjustments = {
-        (f.product_id, f.period_date): {
-            "adjusted_qty": f.adjusted_qty,
-            "adjusted_by": f.adjusted_by,
-            "adjusted_at": f.adjusted_at,
-        }
-        for f in prior_adj_rows
-    }
-
     mape, _, _ = _run_product_forecast(
         p, body.model, body.periods, body.granularity,
-        run_id, today, db, prior_adjustments,
+        run_id, today, db,
     )
     db.commit()
     return {"run_id": run_id, "product_id": body.product_id, "model": body.model, "mape": mape}
@@ -220,6 +238,17 @@ def list_runs(db: Session = Depends(get_db)):
 
 class SaveRunRequest(BaseModel):
     name: str
+
+
+@router.patch("/runs/{run_id}/created-at")
+def patch_run_created_at(run_id: str, body: dict, db: Session = Depends(get_db)):
+    run = db.query(ForecastRun).filter(ForecastRun.run_id == run_id).first()
+    if not run:
+        raise HTTPException(404, "Run not found")
+    from datetime import datetime as _dt
+    run.created_at = _dt.fromisoformat(body["created_at"])
+    db.commit()
+    return {"ok": True, "run_id": run_id, "created_at": run.created_at.isoformat()}
 
 
 @router.put("/runs/{run_id}/save")
@@ -246,12 +275,24 @@ def save_run(run_id: str, body: SaveRunRequest, db: Session = Depends(get_db)):
     return {"run_id": run_id, "name": run.name}
 
 
+@router.delete("/runs/{run_id}")
+def delete_run(run_id: str, db: Session = Depends(get_db)):
+    run = db.query(ForecastRun).filter(ForecastRun.run_id == run_id).first()
+    if not run:
+        raise HTTPException(404, "Run not found")
+    db.query(Forecast).filter(Forecast.run_id == run_id).delete()
+    db.delete(run)
+    db.commit()
+    return {"ok": True, "run_id": run_id}
+
+
 @router.get("/accuracy")
-def forecast_accuracy(lag_weeks: int = 4, run_id: Optional[str] = None, db: Session = Depends(get_db)):
+def forecast_accuracy(lag_weeks: int = 4, run_id: Optional[str] = None, period: Optional[str] = None, db: Session = Depends(get_db)):
     """
     Compare forecasts against actual demand.
-    If run_id is provided, compare that specific run. Otherwise use lag_weeks to find old runs.
-    Returns per-product and overall MAPE / MAE / bias.
+    If run_id is provided, compare all forecast periods from that run that now have actuals.
+    Otherwise use lag_weeks to find old runs within a rolling window.
+    Returns per-product (with customer breakdown) and overall MAPE / MAE / bias.
     """
     today = date.today()
 
@@ -260,6 +301,8 @@ def forecast_accuracy(lag_weeks: int = 4, run_id: Optional[str] = None, db: Sess
         if not specific_run:
             return {"lag_weeks": lag_weeks, "runs_found": 0, "products": [], "overall": None}
         old_runs = [specific_run]
+        # For a specific run: look at all forecast periods that have now passed
+        earliest_date = date(2000, 1, 1)
     else:
         lag_start = today - timedelta(weeks=lag_weeks + 1)
         lag_end   = today - timedelta(weeks=lag_weeks - 1)
@@ -267,54 +310,115 @@ def forecast_accuracy(lag_weeks: int = 4, run_id: Optional[str] = None, db: Sess
             ForecastRun.created_at >= lag_start,
             ForecastRun.created_at <= lag_end,
         ).all()
+        earliest_date = today - timedelta(weeks=lag_weeks + 8)
 
     if not old_runs:
         return {"lag_weeks": lag_weeks, "runs_found": 0, "products": [], "overall": None}
 
     run_ids = [r.run_id for r in old_runs]
 
-    # Fetch forecasts from those runs whose period has now passed (we have actuals)
-    old_forecasts = db.query(Forecast).filter(
+    # Fetch all forecast rows whose period has now passed (used to determine available periods)
+    all_past_forecasts = db.query(Forecast).filter(
         Forecast.run_id.in_(run_ids),
-        Forecast.period_date <= today,
-        Forecast.period_date >= today - timedelta(weeks=lag_weeks + 8),
+        Forecast.period_date < today.replace(day=1),
+        Forecast.period_date >= earliest_date,
     ).all()
 
-    # Build actuals map: (product_id, period_date) -> quantity
+    # Derive available periods for the frontend dropdown
+    available_periods = sorted({f.period_date.strftime("%Y-%m") for f in all_past_forecasts})
+
+    # Filter to a specific period if requested
+    if period:
+        old_forecasts = [f for f in all_past_forecasts if f.period_date.strftime("%Y-%m") == period]
+    else:
+        old_forecasts = all_past_forecasts
+
+    # Build actuals map keyed by (product_id, "YYYY-MM") — aggregate weekly rows into months
     actuals_raw = db.query(SalesHistory).filter(
-        SalesHistory.period_date <= today,
-        SalesHistory.period_date >= today - timedelta(weeks=lag_weeks + 8),
+        SalesHistory.period_date < today.replace(day=1),
+        SalesHistory.period_date >= earliest_date,
     ).all()
-    actuals_map = {(a.product_id, a.period_date): a.quantity for a in actuals_raw}
+    actuals_map: dict[tuple, float] = {}          # (product_id, "YYYY-MM") -> qty
+    cust_actuals_map: dict[tuple, float] = {}      # (product_id, customer, "YYYY-MM") -> qty
+    for a in actuals_raw:
+        ym = a.period_date.strftime("%Y-%m")
+        key = (a.product_id, ym)
+        actuals_map[key] = actuals_map.get(key, 0.0) + (a.quantity or 0.0)
+        if a.customer:
+            ckey = (a.product_id, a.customer, ym)
+            cust_actuals_map[ckey] = cust_actuals_map.get(ckey, 0.0) + (a.quantity or 0.0)
 
-    # Compute per-product errors
-    product_errors: dict = {}
+    # Build forecast map keyed by (product_id, "YYYY-MM")
+    forecast_by_ym: dict[tuple, float] = {}
+    forecast_product_map: dict[int, object] = {}
     for f in old_forecasts:
-        actual = actuals_map.get((f.product_id, f.period_date))
-        if actual is None:
-            continue
+        ym = f.period_date.strftime("%Y-%m")
+        key = (f.product_id, ym)
         used_qty = f.adjusted_qty if f.is_adjusted else f.forecast_qty
-        error = actual - used_qty
-        pid = f.product_id
+        forecast_by_ym[key] = (forecast_by_ym.get(key) or 0.0) + (used_qty or 0.0)
+        if f.product_id not in forecast_product_map:
+            forecast_product_map[f.product_id] = f.product
+
+    # Compute per-product errors (matched by YYYY-MM)
+    product_errors: dict = {}
+    for (pid, ym), actual in actuals_map.items():
+        forecast = forecast_by_ym.get((pid, ym))
+        if forecast is None:
+            continue
         if pid not in product_errors:
-            product_errors[pid] = {"actuals": [], "forecasts": [], "product": f.product}
+            product_errors[pid] = {"actuals": [], "forecasts": [], "product": forecast_product_map.get(pid)}
         product_errors[pid]["actuals"].append(actual)
-        product_errors[pid]["forecasts"].append(used_qty)
+        product_errors[pid]["forecasts"].append(forecast)
+
+    # Per-customer errors: distribute SKU forecast proportionally by customer's actual share
+    cust_errors: dict[tuple, dict] = {}  # (pid, customer) -> {actuals, forecasts}
+    for (pid, customer, ym), actual_qty in cust_actuals_map.items():
+        sku_forecast = forecast_by_ym.get((pid, ym))
+        if sku_forecast is None:
+            continue
+        total_actual = actuals_map.get((pid, ym), 0.0)
+        if total_actual <= 0:
+            continue
+        cust_forecast_share = sku_forecast * (actual_qty / total_actual)
+        ck = (pid, customer)
+        if ck not in cust_errors:
+            cust_errors[ck] = {"actuals": [], "forecasts": [], "customer": customer}
+        cust_errors[ck]["actuals"].append(actual_qty)
+        cust_errors[ck]["forecasts"].append(cust_forecast_share)
 
     products_out = []
     all_actuals, all_forecasts = [], []
     for pid, d in product_errors.items():
         metrics = evaluate_forecast(d["actuals"], d["forecasts"])
         p = d["product"]
+        # Build customer breakdown for this product
+        customers_out = []
+        for (cpid, customer), cd in cust_errors.items():
+            if cpid != pid:
+                continue
+            cm = evaluate_forecast(cd["actuals"], cd["forecasts"])
+            customers_out.append({
+                "customer": customer,
+                "periods_compared": len(cd["actuals"]),
+                "total_actual": round(sum(cd["actuals"]), 1),
+                "total_forecast": round(sum(cd["forecasts"]), 1),
+                "mape": cm["mape"],
+                "mae": cm["mae"],
+                "bias": cm["bias"],
+            })
+        customers_out.sort(key=lambda x: x["customer"] or "")
         products_out.append({
             "product_id": pid,
             "sku": p.sku if p else None,
             "description": p.description if p else None,
             "abc_class": p.abc_class if p else None,
             "periods_compared": len(d["actuals"]),
+            "total_actual": round(sum(d["actuals"]), 1),
+            "total_forecast": round(sum(d["forecasts"]), 1),
             "mape": metrics["mape"],
             "mae": metrics["mae"],
             "bias": metrics["bias"],
+            "customers": customers_out,
         })
         all_actuals.extend(d["actuals"])
         all_forecasts.extend(d["forecasts"])
@@ -326,6 +430,8 @@ def forecast_accuracy(lag_weeks: int = 4, run_id: Optional[str] = None, db: Sess
         "lag_weeks": lag_weeks,
         "runs_found": len(old_runs),
         "run_dates": [r.created_at.isoformat() for r in old_runs if r.created_at],
+        "available_periods": available_periods,
+        "selected_period": period,
         "products": products_out,
         "overall": overall,
     }
@@ -360,28 +466,22 @@ class AdjustMonthRequest(BaseModel):
     total_qty: float
     run_id: Optional[str] = None
     adjusted_by: str = "user"
+    note: Optional[str] = None
 
 
 @router.put("/adjust-month")
 def adjust_month(body: AdjustMonthRequest, db: Session = Depends(get_db)):
-    """
-    Distribute a monthly forecast total equally across all weekly Forecast rows
-    in that calendar month. E.g. entering 700 for March with 4 weeks → 175/week.
-    """
-    from calendar import monthrange as _mr
+    """Update the single monthly Forecast row for a product/month."""
     try:
         year, month = int(body.year_month[:4]), int(body.year_month[5:7])
     except (ValueError, IndexError):
         raise HTTPException(400, "year_month must be YYYY-MM")
 
-    _, days_in_month = _mr(year, month)
     month_start = date(year, month, 1)
-    month_end = date(year, month, days_in_month)
 
     fq = db.query(Forecast).filter(
         Forecast.product_id == body.product_id,
-        Forecast.period_date >= month_start,
-        Forecast.period_date <= month_end,
+        Forecast.period_date == month_start,
     )
     if body.run_id:
         fq = fq.filter(Forecast.run_id == body.run_id)
@@ -390,25 +490,58 @@ def adjust_month(body: AdjustMonthRequest, db: Session = Depends(get_db)):
         if latest_run:
             fq = fq.filter(Forecast.run_id == latest_run.run_id)
 
-    forecasts = fq.order_by(Forecast.period_date).all()
-    if not forecasts:
-        raise HTTPException(404, "No forecast records found for this month — run a forecast first")
+    f = fq.first()
+    if not f:
+        raise HTTPException(404, "No forecast record found for this month — run a forecast first")
 
-    per_week = round(body.total_qty / len(forecasts), 4)
-    now = datetime.utcnow()
-    for f in forecasts:
-        old_qty = f.adjusted_qty if f.is_adjusted else f.forecast_qty
-        f.is_adjusted = True
-        f.adjusted_qty = per_week
-        f.adjusted_by = body.adjusted_by
-        f.adjusted_at = now
-        db.add(ForecastAdjustLog(
-            forecast_id=f.id, product_id=f.product_id, period_date=f.period_date,
-            old_qty=old_qty, new_qty=per_week, changed_by=body.adjusted_by,
-        ))
-
+    old_qty = f.adjusted_qty if f.is_adjusted else f.forecast_qty
+    f.is_adjusted = True
+    f.adjusted_qty = body.total_qty
+    f.adjusted_by = body.adjusted_by
+    f.adjusted_at = datetime.utcnow()
+    f.adjusted_note = body.note or None
+    db.add(ForecastAdjustLog(
+        forecast_id=f.id, product_id=f.product_id, period_date=f.period_date,
+        old_qty=old_qty, new_qty=body.total_qty, changed_by=body.adjusted_by, note=body.note or None,
+    ))
     db.commit()
-    return {"ok": True, "weeks_updated": len(forecasts), "per_week_qty": per_week}
+    return {"ok": True, "month": body.year_month, "total_qty": body.total_qty}
+
+
+class RevertMonthRequest(BaseModel):
+    product_id: int
+    year_month: str
+    run_id: Optional[str] = None
+
+
+@router.delete("/adjust-month")
+def revert_month(body: RevertMonthRequest, db: Session = Depends(get_db)):
+    """Revert a monthly forecast back to the statistical (un-adjusted) value."""
+    try:
+        year, month = int(body.year_month[:4]), int(body.year_month[5:7])
+    except (ValueError, IndexError):
+        raise HTTPException(400, "year_month must be YYYY-MM")
+    month_start = date(year, month, 1)
+    fq = db.query(Forecast).filter(
+        Forecast.product_id == body.product_id,
+        Forecast.period_date == month_start,
+    )
+    if body.run_id:
+        fq = fq.filter(Forecast.run_id == body.run_id)
+    else:
+        latest_run = db.query(ForecastRun).order_by(ForecastRun.created_at.desc()).first()
+        if latest_run:
+            fq = fq.filter(Forecast.run_id == latest_run.run_id)
+    f = fq.first()
+    if not f:
+        raise HTTPException(404)
+    f.is_adjusted = False
+    f.adjusted_qty = None
+    f.adjusted_by = None
+    f.adjusted_at = None
+    f.adjusted_note = None
+    db.commit()
+    return {"ok": True, "forecast_qty": f.forecast_qty}
 
 
 @router.put("/{fid}/adjust")
@@ -421,6 +554,7 @@ def adjust_forecast(fid: int, body: AdjustRequest, db: Session = Depends(get_db)
     f.adjusted_qty = body.adjusted_qty
     f.adjusted_by = body.adjusted_by
     f.adjusted_at = datetime.utcnow()
+    f.adjusted_note = body.note or None
 
     log = ForecastAdjustLog(
         forecast_id=fid,
@@ -429,8 +563,55 @@ def adjust_forecast(fid: int, body: AdjustRequest, db: Session = Depends(get_db)
         old_qty=old_qty,
         new_qty=body.adjusted_qty,
         changed_by=body.adjusted_by,
+        note=body.note or None,
     )
     db.add(log)
+    db.commit()
+    return {"ok": True}
+
+
+class NoteRequest(BaseModel):
+    note: Optional[str] = None
+
+
+@router.patch("/{fid}/note")
+def set_forecast_note(fid: int, body: NoteRequest, db: Session = Depends(get_db)):
+    f = db.query(Forecast).filter(Forecast.id == fid).first()
+    if not f:
+        raise HTTPException(404)
+    f.adjusted_note = body.note or None
+    # Update the most recent adjustment log entry for this forecast
+    log_entry = (
+        db.query(ForecastAdjustLog)
+        .filter(ForecastAdjustLog.forecast_id == fid)
+        .order_by(ForecastAdjustLog.changed_at.desc())
+        .first()
+    )
+    if not log_entry:
+        # Fallback: match by product + period (covers older entries where forecast_id may be null)
+        log_entry = (
+            db.query(ForecastAdjustLog)
+            .filter(
+                ForecastAdjustLog.product_id == f.product_id,
+                ForecastAdjustLog.period_date == f.period_date,
+                ForecastAdjustLog.customer == None,
+            )
+            .order_by(ForecastAdjustLog.changed_at.desc())
+            .first()
+        )
+    if log_entry:
+        log_entry.note = body.note or None
+    else:
+        # No prior log entry — create one so the note is always recorded
+        db.add(ForecastAdjustLog(
+            forecast_id=fid,
+            product_id=f.product_id,
+            period_date=f.period_date,
+            old_qty=f.adjusted_qty if f.is_adjusted else f.forecast_qty,
+            new_qty=f.adjusted_qty if f.is_adjusted else f.forecast_qty,
+            changed_by=f.adjusted_by or "user",
+            note=body.note or None,
+        ))
     db.commit()
     return {"ok": True}
 
@@ -452,6 +633,8 @@ def adjustment_log(product_id: Optional[int] = None, limit: int = 100,
             "old_qty": r.old_qty,
             "new_qty": r.new_qty,
             "changed_by": r.changed_by,
+            "note": r.note,
+            "customer": r.customer,
             "changed_at": r.changed_at.isoformat() if r.changed_at else None,
         }
         for r in rows

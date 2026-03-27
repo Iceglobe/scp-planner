@@ -2,10 +2,20 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from datetime import date, timedelta
 from database import get_db
-from models import Product, Inventory, PurchaseOrder, SalesHistory, Forecast, ForecastRun
+from models import Product, Inventory, PurchaseOrder, SalesHistory, Forecast, ForecastRun, MrpRun
 from algorithms.abc_analysis import classify_abc
 
 router = APIRouter()
+
+
+def _inv_status(position: float, rop: float, ss: float) -> str:
+    if position <= 0:
+        return "stockout"
+    if position < (ss or 0):
+        return "below_ss"
+    if position < (rop or 0) * 1.5:
+        return "healthy"
+    return "overstocked"
 
 
 @router.get("/kpis")
@@ -36,6 +46,22 @@ def get_kpis(db: Session = Depends(get_db)):
         cls = p.abc_class or "C"
         abc_counts[cls] = abc_counts.get(cls, 0) + 1
 
+    status_counts = {"stockout": 0, "below_ss": 0, "healthy": 0, "overstocked": 0}
+    for inv in inventories:
+        p = inv.product
+        pos = inv.quantity_on_hand + inv.quantity_on_order - inv.quantity_reserved
+        s = _inv_status(pos, p.reorder_point or 0, p.safety_stock_qty or 0)
+        status_counts[s] = status_counts.get(s, 0) + 1
+
+    last_mrp = db.query(MrpRun).order_by(MrpRun.run_date.desc()).first()
+    last_mrp_run = None
+    if last_mrp:
+        last_mrp_run = {
+            "run_date": last_mrp.run_date.isoformat() if hasattr(last_mrp.run_date, "isoformat") else str(last_mrp.run_date),
+            "status": last_mrp.status,
+            "po_count": last_mrp.po_count,
+        }
+
     return {
         "inventory_value": round(total_inv_value, 2),
         "open_po_count": len(open_pos),
@@ -44,6 +70,8 @@ def get_kpis(db: Session = Depends(get_db)):
         "items_at_risk": critical_items,
         "total_products": len(products),
         "abc_counts": abc_counts,
+        "status_counts": status_counts,
+        "last_mrp_run": last_mrp_run,
     }
 
 
@@ -51,6 +79,9 @@ def get_kpis(db: Session = Depends(get_db)):
 def get_abc_analysis(db: Session = Depends(get_db)):
     cutoff = date.today() - timedelta(weeks=52)
     products = db.query(Product).filter(Product.active == True).all()
+
+    # Save lock state before classify_abc overwrites abc_class
+    locked = {p.id: p.abc_class for p in products if p.abc_locked}
 
     enriched = []
     for p in products:
@@ -64,10 +95,20 @@ def get_abc_analysis(db: Session = Depends(get_db)):
         })
 
     result = classify_abc(enriched)
-    class_map = {r["product_id"]: r["abc_class"] for r in result}
+
+    # Annotate with model class, restore locked overrides
+    for item in result:
+        pid = item["product_id"]
+        item["model_abc_class"] = item["abc_class"]
+        item["abc_locked"] = pid in locked
+        if pid in locked:
+            item["abc_class"] = locked[pid]
+
+    # Only update non-locked products in DB
+    model_map = {r["product_id"]: r["model_abc_class"] for r in result}
     for p in products:
-        if p.id in class_map:
-            p.abc_class = class_map[p.id]
+        if p.id in model_map and not (p.abc_locked or False):
+            p.abc_class = model_map[p.id]
     db.commit()
     return result
 

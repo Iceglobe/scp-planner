@@ -1,0 +1,21 @@
+# Python
+backend/.venv/
+backend/__pycache__/
+backend/**/__pycache__/
+backend/**/*.pyc
+backend/**/*.pyo
+backend/*.pyc
+backend/seed.py
+
+# Database files (managed via volume mounts in production)
+backend/*.db
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# Dev artefacts
+**/.DS_Store
+**/*.log
+.git/
+data/

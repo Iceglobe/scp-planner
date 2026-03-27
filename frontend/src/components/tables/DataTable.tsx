@@ -1,6 +1,6 @@
-import { useMemo, useCallback } from 'react'
+import { useMemo } from 'react'
 import { AgGridReact } from 'ag-grid-react'
-import { ColDef, RowClassRules, CellValueChangedEvent, GridReadyEvent } from 'ag-grid-community'
+import { ColDef, RowClassRules, CellValueChangedEvent } from 'ag-grid-community'
 import 'ag-grid-community/styles/ag-grid.css'
 import 'ag-grid-community/styles/ag-theme-alpine.css'
 
@@ -26,17 +26,13 @@ export function DataTable({ rowData, columnDefs, height = 400, onRowClick, onCel
     }
   }
 
-  const onGridReady = useCallback((e: GridReadyEvent) => {
-    setTimeout(() => e.api.sizeColumnsToFit(), 0)
-  }, [])
-
   return (
     <div className="ag-theme-alpine w-full" style={{ height }}>
       <AgGridReact
         rowData={rowData}
         columnDefs={columnDefs}
         defaultColDef={defaultColDef}
-        onGridReady={onGridReady}
+        autoSizeStrategy={{ type: 'fitCellContents' }}
         rowSelection="single"
         onRowClicked={e => onRowClick?.(e.data as Record<string, unknown>)}
         onCellValueChanged={handleCellValueChanged}
@@ -44,6 +40,7 @@ export function DataTable({ rowData, columnDefs, height = 400, onRowClick, onCel
         animateRows={false}
         suppressCellFocus={false}
         stopEditingWhenCellsLoseFocus={true}
+        singleClickEdit={true}
       />
     </div>
   )

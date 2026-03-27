@@ -110,6 +110,27 @@
 .cell-critical { color: #f87171; background-color: rgba(248, 113, 113, 0.1); font-weight: 700; }
 .cell-warning { color: #fb923c; background-color: rgba(251, 146, 60, 0.1); }
 
+/* Custom dark-theme range sliders */
+input.dark-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  border-radius: 9999px;
+  outline: none;
+  cursor: pointer;
+}
+input.dark-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.85);
+  cursor: pointer;
+  margin-top: -5px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+}
+input.dark-slider:focus { outline: none; }
+
 /* Scrollbar */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }

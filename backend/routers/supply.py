@@ -15,6 +15,8 @@ class MrpRunRequest(BaseModel):
     horizon_weeks: int = 12
     forecast_run_id: Optional[str] = None
     consolidation: str = 'day'  # 'day' | 'week' | 'month'
+    health_target_multiplier: float = 5.0  # PO targets position = this * safety_stock
+    min_weeks_cover: float = 0  # floor SS to this many weeks of avg demand
 
 
 class PoUpdate(BaseModel):
@@ -65,9 +67,10 @@ def create_po(body: PoCreate, db: Session = Depends(get_db)):
     order_date = date.fromisocalendar(year, week, 1)
     due_date = order_date + timedelta(days=product.lead_time_days or 0)
     today = date.today()
-    po_count = db.query(PurchaseOrder).count() + 1
+    from sqlalchemy import func as sqlfunc
+    max_id = db.query(sqlfunc.max(PurchaseOrder.id)).scalar() or 0
     po = PurchaseOrder(
-        po_number=f"PO-{today.year}-{po_count:04d}",
+        po_number=f"PO-{today.year}-{max_id + 1:04d}",
         product_id=product.id,
         supplier_id=product.supplier_id,
         status="recommended",
@@ -142,16 +145,6 @@ def run_mrp_endpoint(body: MrpRunRequest, db: Session = Depends(get_db)):
 
     products = db.query(Product).filter(Product.active == True).all()
 
-    mrp_products = [
-        MrpProduct(
-            id=p.id, sku=p.sku, supplier_id=p.supplier_id,
-            lead_time_days=p.lead_time_days, moq=p.moq,
-            reorder_point=p.reorder_point, safety_stock_qty=p.safety_stock_qty,
-            unit_cost=p.cost, max_weekly_capacity=p.max_weekly_capacity,
-        )
-        for p in products
-    ]
-
     inv_rows = db.query(Inventory).all()
     inventory_map = {
         inv.product_id: MrpInventory(
@@ -161,6 +154,23 @@ def run_mrp_endpoint(body: MrpRunRequest, db: Session = Depends(get_db)):
         )
         for inv in inv_rows
     }
+    avg_weekly_by_product = {inv.product_id: (inv.avg_daily_demand or 0) * 7 for inv in inv_rows}
+
+    def effective_ss(product) -> float:
+        base_ss = product.safety_stock_qty or 0
+        if body.min_weeks_cover > 0:
+            return max(base_ss, body.min_weeks_cover * avg_weekly_by_product.get(product.id, 0))
+        return base_ss
+
+    mrp_products = [
+        MrpProduct(
+            id=p.id, sku=p.sku, supplier_id=p.supplier_id,
+            lead_time_days=p.lead_time_days, moq=p.moq,
+            reorder_point=p.reorder_point, safety_stock_qty=effective_ss(p),
+            unit_cost=p.cost, max_weekly_capacity=p.max_weekly_capacity,
+        )
+        for p in products
+    ]
 
     # Build forecast map (product_id, week_index) -> qty
     fq = db.query(Forecast)
@@ -177,15 +187,20 @@ def run_mrp_endpoint(body: MrpRunRequest, db: Session = Depends(get_db)):
                      (Forecast.created_at == latest.c.latest))
 
     forecast_rows = fq.filter(
-        Forecast.period_date >= today,
-        Forecast.period_date <= today + timedelta(weeks=body.horizon_weeks + 2),
+        Forecast.period_date >= today.replace(day=1),
+        Forecast.period_date <= today + timedelta(weeks=body.horizon_weeks + 6),
     ).all()
 
+    # Convert monthly forecast rows to weekly demand (monthly / 4.2 weeks per month)
+    WEEKS_PER_MONTH = 4.2
     forecast_map: dict[tuple, float] = {}
     for f in forecast_rows:
-        week_idx = (f.period_date - today).days // 7
         qty = f.adjusted_qty if f.is_adjusted else f.forecast_qty
-        forecast_map[(f.product_id, week_idx)] = qty
+        weekly_qty = (qty or 0) / WEEKS_PER_MONTH
+        month_str = f.period_date.strftime("%Y-%m")
+        for week_idx in range(body.horizon_weeks + 3):
+            if (today + timedelta(weeks=week_idx)).strftime("%Y-%m") == month_str:
+                forecast_map[(f.product_id, week_idx)] = weekly_qty
 
     # For products with no forecast data, fall back to avg_daily_demand * 7
     # so the engine uses the same demand baseline as the MRP pivot display.
@@ -231,13 +246,62 @@ def run_mrp_endpoint(body: MrpRunRequest, db: Session = Depends(get_db)):
     level0_recs = run_mrp(
         level0, inventory_map, forecast_map, open_orders_map,
         horizon_weeks=body.horizon_weeks, today=today, consolidation=body.consolidation,
+        health_target_multiplier=body.health_target_multiplier,
     )
     recommendations = list(level0_recs)
 
     if bom_children:
-        # Derive demand for each child from parent PO quantities × qty_per
+        # Derive demand for each child from parent PO quantities × qty_per.
+        #
+        # Week-0 confirmed parent PO arrivals: reflected by increasing the
+        # child's quantity_reserved so avg_demand stays 0 (not the spike).
+        # Future-week arrivals: added as explicit forecast demand entries.
+        #
+        # Critically: only seed from level0 parents here. BOM sub-parents
+        # (e.g. P003 whose own confirmed POs drive grandchild P017) are
+        # propagated level-by-level inside the loop below, ensuring each
+        # grandchild is processed in the correct BOM level with full demand.
         product_map = {p.id: p for p in mrp_products}
         derived_demand: dict[tuple, float] = {}
+        child_extra_reserved: dict[int, float] = {}
+
+        # Pre-index confirmed POs by parent for efficient per-level lookup
+        confirmed_by_parent: dict[int, list] = {}
+        for (parent_id, week_idx), qty in open_orders_map.items():
+            confirmed_by_parent.setdefault(parent_id, []).append((week_idx, qty))
+
+        def _seed_confirmed(product_id: int) -> None:
+            """Propagate confirmed PO demand from product_id to its direct children."""
+            for week_idx, qty in confirmed_by_parent.get(product_id, []):
+                for child_id, qty_per in parent_to_children.get(product_id, []):
+                    demand = qty * qty_per
+                    if week_idx == 0:
+                        child_extra_reserved[child_id] = child_extra_reserved.get(child_id, 0) + demand
+                    else:
+                        k = (child_id, week_idx)
+                        derived_demand[k] = derived_demand.get(k, 0) + demand
+
+        # Seed confirmed demand only from level0 parents
+        for p in level0:
+            _seed_confirmed(p.id)
+
+        # Children with extra_reserved need a sentinel week-0 entry so they
+        # appear in level_ids and avg_demand stays 0 (not the spike value).
+        for child_id in child_extra_reserved:
+            derived_demand.setdefault((child_id, 0), 0.0)
+
+        # Build modified inventory map with BOM-driven reservations
+        child_inventory_map = dict(inventory_map)
+        for child_id, extra in child_extra_reserved.items():
+            if child_id in child_inventory_map:
+                inv = child_inventory_map[child_id]
+                child_inventory_map[child_id] = MrpInventory(
+                    quantity_on_hand=inv.quantity_on_hand,
+                    quantity_on_order=inv.quantity_on_order,
+                    quantity_reserved=inv.quantity_reserved + extra,
+                )
+
+        # Also include demand from newly recommended parent POs
         for rec in level0_recs:
             week_idx = max(0, (rec.due_date - today).days // 7)
             for child_id, qty_per in parent_to_children.get(rec.product_id, []):
@@ -252,11 +316,31 @@ def run_mrp_endpoint(body: MrpRunRequest, db: Session = Depends(get_db)):
             level_products = [p for p in bom_children if p.id in level_ids]
             level_forecast = {k: v for k, v in derived_demand.items() if k[0] in level_ids}
             level_recs = run_mrp(
-                level_products, inventory_map, level_forecast, open_orders_map,
+                level_products, child_inventory_map, level_forecast, open_orders_map,
                 horizon_weeks=body.horizon_weeks, today=today, consolidation=body.consolidation,
+                health_target_multiplier=body.health_target_multiplier,
             )
             recommendations.extend(level_recs)
             processed_ids.update(level_ids)
+
+            # Propagate confirmed POs from this level's products to their children,
+            # then rebuild child_inventory_map for any newly reserved children.
+            for lp in level_products:
+                _seed_confirmed(lp.id)
+            for child_id, extra in child_extra_reserved.items():
+                if child_id in processed_ids:
+                    continue
+                base_inv = inventory_map.get(child_id)
+                if base_inv is None:
+                    continue
+                child_inventory_map[child_id] = MrpInventory(
+                    quantity_on_hand=base_inv.quantity_on_hand,
+                    quantity_on_order=base_inv.quantity_on_order,
+                    quantity_reserved=base_inv.quantity_reserved + extra,
+                )
+                derived_demand.setdefault((child_id, 0), 0.0)
+
+            # Propagate recommendations from this level to their children
             for rec in level_recs:
                 week_idx = max(0, (rec.due_date - today).days // 7)
                 for child_id, qty_per in parent_to_children.get(rec.product_id, []):
@@ -264,7 +348,18 @@ def run_mrp_endpoint(body: MrpRunRequest, db: Session = Depends(get_db)):
                         k = (child_id, week_idx)
                         derived_demand[k] = derived_demand.get(k, 0) + rec.quantity * qty_per
 
-    po_counter = db.query(PurchaseOrder).count() + 1
+    from sqlalchemy import func
+    year_prefix = f"PO-{today.year}-"
+    max_po_this_year = db.query(func.max(PurchaseOrder.po_number)).filter(
+        PurchaseOrder.po_number.like(f"{year_prefix}%")
+    ).scalar()
+    if max_po_this_year:
+        try:
+            po_counter = int(max_po_this_year.split("-")[-1]) + 1
+        except ValueError:
+            po_counter = 1
+    else:
+        po_counter = 1
     new_pos = []
     for i, rec in enumerate(recommendations):
         po_num = f"PO-{today.year}-{(po_counter + i):04d}"
@@ -333,15 +428,19 @@ def mrp_pivot(weeks: int = 12, db: Session = Depends(get_db)):
         (Forecast.product_id == latest_subq.c.product_id) &
         (Forecast.created_at == latest_subq.c.latest)
     ).filter(
-        Forecast.period_date >= today,
-        Forecast.period_date <= today + timedelta(weeks=weeks + 2),
+        Forecast.period_date >= today.replace(day=1),
+        Forecast.period_date <= today + timedelta(weeks=weeks + 6),
     ).all()
 
+    # Convert monthly forecast rows to weekly demand (monthly / 4.2 weeks per month)
     forecast_map: dict = {}
     for f in forecast_rows:
-        w_idx = (f.period_date - today).days // 7
-        if 0 <= w_idx < weeks:
-            forecast_map[(f.product_id, w_idx)] = f.adjusted_qty if f.is_adjusted else f.forecast_qty
+        qty = f.adjusted_qty if f.is_adjusted else f.forecast_qty
+        weekly_qty = (qty or 0) / 4.2
+        month_str = f.period_date.strftime("%Y-%m")
+        for w_idx in range(weeks):
+            if (today + timedelta(weeks=w_idx)).strftime("%Y-%m") == month_str:
+                forecast_map[(f.product_id, w_idx)] = weekly_qty
 
     all_pos = db.query(PurchaseOrder).filter(
         PurchaseOrder.status.in_(["planned", "confirmed", "in_transit", "recommended"])
@@ -388,9 +487,11 @@ def mrp_pivot(weeks: int = 12, db: Session = Depends(get_db)):
             k = (child_id, w_idx)
             derived_confirmed_map[k] = derived_confirmed_map.get(k, 0) + qty * qty_per
 
-    # suggested PO order weeks of parent → child's forecast (planned demand, no lead time offset)
+    # suggested PO arrival weeks of parent → child's forecast
+    # Keyed by due_date (arrival) to match derived_confirmed_map and the MRP engine,
+    # so proj. inventory correctly reflects when components are actually consumed.
     derived_forecast_map: dict[tuple, float] = {}
-    for (pid, w_idx), qty in suggested_order_map.items():
+    for (pid, w_idx), qty in suggested_arrival_map.items():
         for child_id, qty_per in parent_to_children_bom.get(pid, []):
             k = (child_id, w_idx)
             derived_forecast_map[k] = derived_forecast_map.get(k, 0) + qty * qty_per
@@ -450,11 +551,13 @@ def mrp_pivot(weeks: int = 12, db: Session = Depends(get_db)):
 
         base = {"product_id": product.id, "sku": product.sku, "description": product.description,
                 "abc_class": product.abc_class, "supplier": supplier_name, "safety_stock": ss,
+                "avg_weekly_demand": round(avg_demand, 2),
                 "moq": product.moq or 0, "max_weekly_capacity": product.max_weekly_capacity,
                 "item_type": product.item_type or "purchased",
                 "reorder_point": product.reorder_point or 0,
                 "on_hand_today": round(on_hand, 1), "lead_time_days": lead_time,
-                "work_center": work_center_map.get(product.id)}
+                "work_center": work_center_map.get(product.id),
+                "unit_cost": product.cost or 0, "selling_price": product.selling_price or 0}
         sub = {"sku": None, "description": None, "abc_class": None, "supplier": None,
                "on_hand_today": None, "lead_time_days": None, "moq": None,
                "max_weekly_capacity": None, "item_type": None, "reorder_point": None}

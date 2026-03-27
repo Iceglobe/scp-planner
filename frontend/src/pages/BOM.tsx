@@ -1,8 +1,8 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { Plus, Trash2, GitBranch } from 'lucide-react'
-import { getBomTree, getProducts, addBomItem, updateBomItem, deleteBomItem, updateProduct } from '../api'
-import type { BomTreeNode, Product } from '../api/types'
+import { getBomTree, getProducts, addBomItem, updateBomItem, deleteBomItem, updateProduct, getFlows, getWorkstations } from '../api'
+import type { BomTreeNode, Product, ProductionFlow, Workstation } from '../api/types'
 import { Spinner } from '../components/ui'
 
 // ── Flatten tree into ordered rows ────────────────────────────────────────────
@@ -109,6 +109,98 @@ function UomCell({ value, productId, onSaved }: { value: string; productId: numb
       title="Click to edit unit"
     >
       {value}
+    </button>
+  )
+}
+
+// ── Production flow cell (level-0 only) ──────────────────────────────────────
+
+function ProductionFlowCell({ value, productId, flows, onSaved }: {
+  value: number | null
+  productId: number
+  flows: ProductionFlow[]
+  onSaved: () => void
+}) {
+  const [editing, setEditing] = useState(false)
+
+  const commit = async (newVal: string) => {
+    setEditing(false)
+    const newId = newVal === '' ? null : parseInt(newVal, 10)
+    if (newId === value) return
+    await updateProduct(productId, { production_flow_id: newId })
+    onSaved()
+  }
+
+  const flowName = flows.find(f => f.id === value)?.name
+
+  if (editing)
+    return (
+      <select
+        autoFocus
+        className="bg-zinc-800 border border-brand-400 rounded px-1.5 py-0.5 text-xs text-white outline-none cursor-pointer max-w-[160px]"
+        defaultValue={value ?? ''}
+        onChange={e => commit(e.target.value)}
+        onKeyDown={e => { if (e.key === 'Escape') setEditing(false) }}
+        onBlur={() => setEditing(false)}
+      >
+        <option value="">— none —</option>
+        {flows.map(f => <option key={f.id} value={f.id}>{f.name}</option>)}
+      </select>
+    )
+
+  return (
+    <button
+      className="text-xs font-mono text-white/40 hover:text-white hover:bg-white/[0.08] rounded px-1.5 py-0.5 transition-colors cursor-text max-w-[160px] truncate"
+      onClick={() => setEditing(true)}
+      title="Click to assign production flow"
+    >
+      {flowName ?? '—'}
+    </button>
+  )
+}
+
+// ── Workstation cell (BOM parents only) ──────────────────────────────────────
+
+function WorkstationCell({ value, productId, workstations, onSaved }: {
+  value: number | null
+  productId: number
+  workstations: Workstation[]
+  onSaved: () => void
+}) {
+  const [editing, setEditing] = useState(false)
+
+  const commit = async (newVal: string) => {
+    setEditing(false)
+    const newId = newVal === '' ? null : parseInt(newVal, 10)
+    if (newId === value) return
+    await updateProduct(productId, { workstation_id: newId })
+    onSaved()
+  }
+
+  const wsName = workstations.find(w => w.id === value)?.name
+
+  if (editing)
+    return (
+      <select
+        autoFocus
+        className="bg-zinc-800 border border-brand-400 rounded px-1.5 py-0.5 text-xs text-white outline-none cursor-pointer max-w-[140px]"
+        defaultValue={value ?? ''}
+        onChange={e => commit(e.target.value)}
+        onKeyDown={e => { if (e.key === 'Escape') setEditing(false) }}
+        onBlur={() => setEditing(false)}
+      >
+        <option value="">— none —</option>
+        {workstations.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}
+      </select>
+    )
+
+  return (
+    <button
+      className="text-xs font-mono text-white/40 hover:text-white hover:bg-white/[0.08] rounded px-1.5 py-0.5 transition-colors cursor-text max-w-[140px] truncate"
+      onClick={() => setEditing(true)}
+      title="Click to assign workstation"
+    >
+      {wsName ?? '—'}
     </button>
   )
 }
@@ -638,6 +730,8 @@ function BomTreePanel({
 export default function BOM() {
   const [tree, setTree]       = useState<BomTreeNode[]>([])
   const [products, setProducts] = useState<Product[]>([])
+  const [flows, setFlows] = useState<ProductionFlow[]>([])
+  const [workstations, setWorkstations] = useState<Workstation[]>([])
   const [loading, setLoading] = useState(true)
   const [adding, setAdding]   = useState(false)
   const [addLevel, setAddLevel]   = useState<number | undefined>()
@@ -645,8 +739,8 @@ export default function BOM() {
   const [selectedProductId, setSelectedProductId] = useState<number | null>(null)
 
   const load = useCallback(async () => {
-    const [t, p] = await Promise.all([getBomTree(), getProducts()])
-    setTree(t); setProducts(p); setLoading(false)
+    const [t, p, fl, ws] = await Promise.all([getBomTree(), getProducts(), getFlows(), getWorkstations()])
+    setTree(t); setProducts(p); setFlows(fl); setWorkstations(ws); setLoading(false)
   }, [])
 
   useEffect(() => { load() }, [load])
@@ -671,6 +765,10 @@ export default function BOM() {
   if (loading) return <Spinner className="h-64" />
 
   const rows = flattenTree(tree)
+  // Products that appear as a parent of at least one other row (BOM parents = need a workstation)
+  const parentProductIds = new Set(
+    rows.map(r => r.parent_product_id).filter((id): id is number => id !== undefined)
+  )
 
   return (
     <div className="flex flex-col gap-3">
@@ -716,6 +814,8 @@ export default function BOM() {
               <th className="px-3 py-2.5 text-left">Description</th>
               <th className="px-3 py-2.5 text-right w-24">Qty</th>
               <th className="px-3 py-2.5 text-left w-16">Unit</th>
+              <th className="px-3 py-2.5 text-left w-36">Production Flow</th>
+              <th className="px-3 py-2.5 text-left w-36">Workstation</th>
               <th className="px-3 py-2.5 w-14" />
             </tr>
           </thead>
@@ -723,7 +823,7 @@ export default function BOM() {
 
             {rows.length === 0 && !adding && (
               <tr>
-                <td colSpan={6} className="px-4 py-12 text-center text-white/30 text-sm">
+                <td colSpan={8} className="px-4 py-12 text-center text-white/30 text-sm">
                   No BOM items yet — click <strong>Create new BOM</strong> to get started.
                 </td>
               </tr>
@@ -778,6 +878,34 @@ export default function BOM() {
                   {/* Unit */}
                   <td className="px-3 py-2" onClick={e => e.stopPropagation()}>
                     <UomCell value={row.unit_of_measure} productId={row.product_id} onSaved={reload} />
+                  </td>
+
+                  {/* Production Flow — level-0 only */}
+                  <td className="px-3 py-2" onClick={e => e.stopPropagation()}>
+                    {row.level === 0 ? (
+                      <ProductionFlowCell
+                        value={products.find(p => p.id === row.product_id)?.production_flow_id ?? null}
+                        productId={row.product_id}
+                        flows={flows}
+                        onSaved={reload}
+                      />
+                    ) : (
+                      <span className="text-xs text-white/10">—</span>
+                    )}
+                  </td>
+
+                  {/* Workstation — L0 and L1+ parents (items that have children) */}
+                  <td className="px-3 py-2" onClick={e => e.stopPropagation()}>
+                    {parentProductIds.has(row.product_id) ? (
+                      <WorkstationCell
+                        value={products.find(p => p.id === row.product_id)?.workstation_id ?? null}
+                        productId={row.product_id}
+                        workstations={workstations}
+                        onSaved={reload}
+                      />
+                    ) : (
+                      <span className="text-xs text-white/10">—</span>
+                    )}
                   </td>
 
                   {/* Actions — always-visible + button, delete on hover */}

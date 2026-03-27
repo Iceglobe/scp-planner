@@ -38,6 +38,7 @@ class Product(Base):
     safety_stock_qty = Column(Float, default=0.0)
     service_level = Column(Float, default=0.95)
     abc_class = Column(String)
+    abc_locked = Column(Boolean, default=False)
     item_type = Column(String, default="purchased")   # "purchased" | "produced"
     max_weekly_capacity = Column(Float)               # nullable = no constraint
     smoothing_alpha = Column(Float, default=0.3)
@@ -45,7 +46,11 @@ class Product(Base):
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
+    workstation_id = Column(Integer, ForeignKey("workstations.id"), nullable=True)
+    production_flow_id = Column(Integer, nullable=True)
+
     supplier = relationship("Supplier", back_populates="products")
+    workstation = relationship("Workstation", back_populates="products")
     sales_history = relationship("SalesHistory", back_populates="product")
     forecasts = relationship("Forecast", back_populates="product")
     inventory = relationship("Inventory", back_populates="product", uselist=False)
@@ -61,10 +66,11 @@ class SalesHistory(Base):
     quantity = Column(Float, nullable=False)
     revenue = Column(Float, default=0.0)
     source = Column(String, default="actual")
+    customer = Column(String, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
 
     product = relationship("Product", back_populates="sales_history")
-    __table_args__ = (UniqueConstraint("product_id", "period_date"),)
+    __table_args__ = (UniqueConstraint("product_id", "period_date", "customer"),)
 
 
 class ForecastRun(Base):
@@ -96,6 +102,7 @@ class Forecast(Base):
     adjusted_qty = Column(Float)
     adjusted_by = Column(String)
     adjusted_at = Column(DateTime)
+    adjusted_note = Column(String)
     created_at = Column(DateTime, server_default=func.now())
 
     product = relationship("Product", back_populates="forecasts")
@@ -106,12 +113,14 @@ class Forecast(Base):
 class ForecastAdjustLog(Base):
     __tablename__ = "forecast_adjust_log"
     id = Column(Integer, primary_key=True, autoincrement=True)
-    forecast_id = Column(Integer, ForeignKey("forecasts.id"), nullable=False)
+    forecast_id = Column(Integer, ForeignKey("forecasts.id"), nullable=True)
     product_id = Column(Integer, ForeignKey("products.id"), nullable=False)
     period_date = Column(Date, nullable=False)
     old_qty = Column(Float)
     new_qty = Column(Float, nullable=False)
     changed_by = Column(String, default="user")
+    note = Column(String)
+    customer = Column(String, nullable=True)
     changed_at = Column(DateTime, server_default=func.now())
 
     product = relationship("Product")
@@ -204,10 +213,20 @@ class CustomerDemand(Base):
     quantity = Column(Float, nullable=False, default=0.0)
     revenue = Column(Float, default=0.0)
     source = Column(String, default="actual")  # "actual" | "forecast"
+    is_adjusted = Column(Boolean, default=False)
+    note = Column(String, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
 
     product = relationship("Product")
     __table_args__ = (UniqueConstraint("product_id", "customer", "period_date", "source"),)
+
+
+class CustomerPriority(Base):
+    __tablename__ = "customer_priority"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    customer = Column(String, nullable=False)
+    product_id = Column(Integer, ForeignKey("products.id"), nullable=False)
+    __table_args__ = (UniqueConstraint("customer", "product_id", name="uq_customer_priority"),)
 
 
 class BomItem(Base):
@@ -221,6 +240,32 @@ class BomItem(Base):
     parent = relationship("Product", foreign_keys=[parent_product_id])
     child = relationship("Product", foreign_keys=[child_product_id])
     __table_args__ = (UniqueConstraint("parent_product_id", "child_product_id"),)
+
+
+class Workstation(Base):
+    __tablename__ = "workstations"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String, unique=True, nullable=False)
+    capacity_units_per_week = Column(Float, nullable=False, default=0.0)
+    capacity_per_shift = Column(Float, nullable=False, default=0.0)
+    num_shifts = Column(Integer, nullable=False, default=1)
+    hours_per_day = Column(Float, nullable=False, default=8.0)
+    days_per_week = Column(Integer, nullable=False, default=5)
+    cycle_rate_units_per_min = Column(Float, nullable=False, default=0.0)
+    cycle_time_minutes = Column(Float, nullable=False, default=0.0)
+    department = Column(String)
+    notes = Column(Text)
+    created_at = Column(DateTime, server_default=func.now())
+
+    products = relationship("Product", back_populates="workstation")
+
+
+class ProductionFlow(Base):
+    __tablename__ = "production_flows"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String, nullable=False)
+    workstation_ids = Column(Text, nullable=False, default="[]")  # JSON array of workstation IDs
+    created_at = Column(DateTime, server_default=func.now())
 
 
 class DataConnector(Base):

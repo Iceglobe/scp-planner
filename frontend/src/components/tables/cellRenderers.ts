@@ -6,6 +6,8 @@ const ABC_COLORS: Record<string, { bg: string; text: string }> = {
   A: { bg: 'rgba(5,150,105,0.15)', text: '#6ee7b7' },
   B: { bg: 'rgba(217,119,6,0.15)', text: '#fcd34d' },
   C: { bg: 'rgba(82,82,91,0.15)', text: 'rgba(255,255,255,0.5)' },
+  NPI: { bg: 'rgba(99,102,241,0.2)', text: '#a5b4fc' },
+  'Phase Out': { bg: 'rgba(239,68,68,0.15)', text: '#fca5a5' },
 }
 
 export function abcCellRenderer(p: { value?: string }) {

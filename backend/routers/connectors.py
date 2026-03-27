@@ -135,7 +135,7 @@ def refresh_entity(entity: str, db: Session = Depends(get_db)):
         except HTTPException:
             raise
         except Exception as e:
-            raise HTTPException(400, f"Could not re-fetch from source URL: {e}")
+            raise HTTPException(400, f"Could not re-fetch from source URL: {e}") from None
         # Update cached file
         (UPLOADS_DIR / f"{entity}_latest{meta['suffix']}").write_bytes(content)
     else:
@@ -156,7 +156,10 @@ def refresh_entity(entity: str, db: Session = Depends(get_db)):
     if mapping:
         df = df.rename(columns=mapping)
 
-    result = _import_dataframe(df, entity, meta.get("import_mode", "append"), db)
+    try:
+        result = _import_dataframe(df, entity, meta.get("import_mode", "append"), db)
+    except Exception as e:
+        raise HTTPException(500, f"Import failed: {e}") from None
     return {**result, "columns_found": list(df.columns)}
 
 
@@ -274,36 +277,6 @@ def test_sql(body: SqlTestRequest):
         return {"success": False, "error": str(e)}
 
 
-def _backfill_missing_forecasts(db: Session) -> int:
-    """After a data refresh, find active products with no forecast in the latest run and add them."""
-    from datetime import date as _date
-    from models import ForecastRun, Forecast
-    from routers.forecasts import _run_product_forecast
-
-    latest_run = db.query(ForecastRun).order_by(ForecastRun.created_at.desc()).first()
-    if not latest_run:
-        return 0
-
-    forecasted_ids = {
-        r[0] for r in db.query(Forecast.product_id)
-        .filter(Forecast.run_id == latest_run.run_id)
-        .distinct()
-        .all()
-    }
-
-    missing = db.query(Product).filter(Product.active == True, ~Product.id.in_(forecasted_ids)).all()
-    if not missing:
-        return 0
-
-    today = _date.today()
-    for p in missing:
-        _run_product_forecast(
-            p, latest_run.model, latest_run.periods_ahead, latest_run.granularity,
-            latest_run.run_id, today, db, prior_adjustments={},
-        )
-
-    return len(missing)
-
 
 def _import_dataframe(df, target_entity: str, import_mode: str, db: Session) -> dict:
     """Run entity-specific import logic on an already-parsed, already-mapped DataFrame."""
@@ -364,7 +337,7 @@ def _import_dataframe(df, target_entity: str, import_mode: str, db: Session) -> 
             for r in db.query(SalesHistory).filter(
                 SalesHistory.product_id.in_([p.id for p in product_map.values()])
             ).all():
-                existing_map[(r.product_id, r.period_date)] = r
+                existing_map[(r.product_id, r.period_date, r.customer)] = r
 
         for _, row in df.iterrows():
             try:
@@ -375,14 +348,17 @@ def _import_dataframe(df, target_entity: str, import_mode: str, db: Session) -> 
                 period_date = pd.to_datetime(row.get("period_date")).date()
                 quantity = float(row.get("quantity", 0))
                 revenue = float(row.get("revenue", 0))
-                key = (p.id, period_date)
+                customer_val = row.get("customers") or row.get("customer")
+                customer = str(customer_val).strip() if customer_val is not None and str(customer_val).strip() not in ("", "nan") else None
+                key = (p.id, period_date, customer)
                 if key in existing_map:
                     existing_map[key].quantity = quantity
                     existing_map[key].revenue = revenue
                 else:
                     obj = SalesHistory(
                         product_id=p.id, period_date=period_date,
-                        quantity=quantity, revenue=revenue, source="upload"
+                        quantity=quantity, revenue=revenue, source="upload",
+                        customer=customer,
                     )
                     db.add(obj)
                     existing_map[key] = obj
@@ -461,7 +437,7 @@ def _import_dataframe(df, target_entity: str, import_mode: str, db: Session) -> 
                 else:
                     db.add(PurchaseOrder(
                         po_number=po_number, product_id=p.id,
-                        supplier_id=p.supplier_id, status="planned",
+                        supplier_id=p.supplier_id, status="confirmed",
                         quantity=quantity, unit_cost=unit_cost,
                         order_date=order_date, due_date=due_date,
                     ))
@@ -541,15 +517,44 @@ def _import_dataframe(df, target_entity: str, import_mode: str, db: Session) -> 
                 if first_error is None:
                     first_error = str(e)
 
-    backfilled = 0
-    if target_entity in ("products", "sales_history"):
-        backfilled = _backfill_missing_forecasts(db)
-
     db.commit()
-    result = {"rows_imported": rows_imported, "total_rows": len(df), "error": first_error}
-    if backfilled:
-        result["forecasts_backfilled"] = backfilled
-    return result
+
+    # After importing sales history, auto-refresh demand stats so SS/ROP stay current.
+    if target_entity == "sales_history":
+        import statistics as _stats
+        from datetime import date as _date, timedelta as _td
+        from algorithms.safety_stock import (
+            calculate_safety_stock as _calc_ss,
+            calculate_reorder_point as _calc_rop,
+            suggest_service_level as _suggest_sl,
+        )
+        from routers.products import _weekly_demand_stats
+        cutoff = _date.today() - _td(weeks=26)
+        exempt = {'NPI', 'Phase Out'}
+        seen_ids: set[int] = set()
+        for p in product_map.values():
+            if p is None or p.id in seen_ids or p.abc_class in exempt:
+                continue
+            seen_ids.add(p.id)
+            rows = db.query(SalesHistory).filter(
+                SalesHistory.product_id == p.id,
+                SalesHistory.period_date >= cutoff,
+            ).all()
+            stats = _weekly_demand_stats(rows)
+            if stats is None:
+                continue
+            avg_weekly, std_weekly, avg_daily = stats
+            sl = p.service_level or _suggest_sl(p.abc_class or "B")
+            ss = _calc_ss(sl, std_weekly, p.lead_time_days)
+            rop = _calc_rop(avg_weekly, p.lead_time_days, ss)
+            p.safety_stock_qty = ss
+            p.reorder_point = rop
+            if p.inventory:
+                p.inventory.avg_daily_demand = round(avg_daily, 4)
+                p.inventory.demand_std_dev = round(std_weekly, 4)
+        db.commit()
+
+    return {"rows_imported": rows_imported, "total_rows": len(df), "error": first_error}
 
 
 def _conn_dict(c: DataConnector) -> dict:

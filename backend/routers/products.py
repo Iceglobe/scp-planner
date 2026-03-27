@@ -11,6 +11,34 @@ import statistics
 router = APIRouter()
 
 
+def _weekly_demand_stats(history_rows):
+    """
+    Normalise SalesHistory rows of any granularity (weekly, monthly, etc.) to
+    weekly-equivalent quantities, then return (avg_weekly, std_weekly, avg_daily).
+
+    Period length is inferred from the median gap between consecutive period_dates.
+    Multiple rows per date (e.g. per-customer breakdown) are summed before gap
+    detection, so same-date rows don't corrupt the median with 0-day gaps.
+    """
+    if not history_rows:
+        return None
+    # Aggregate quantities by date (handles per-customer row splits)
+    from collections import defaultdict
+    by_date = defaultdict(float)
+    for r in history_rows:
+        by_date[r.period_date] += r.quantity
+    unique_dates = sorted(by_date.keys())
+    if len(unique_dates) < 2:
+        return None
+    gaps = [(unique_dates[i + 1] - unique_dates[i]).days for i in range(len(unique_dates) - 1)]
+    # Use median gap to ignore outliers (e.g. a missing month)
+    period_days = max(1.0, sorted(gaps)[len(gaps) // 2])
+    weekly_qtys = [by_date[d] * 7.0 / period_days for d in unique_dates]
+    avg_weekly = sum(weekly_qtys) / len(weekly_qtys)
+    std_weekly = statistics.stdev(weekly_qtys) if len(weekly_qtys) > 1 else 0.0
+    return avg_weekly, std_weekly, avg_weekly / 7.0
+
+
 class ProductCreate(BaseModel):
     sku: str
     description: str
@@ -25,6 +53,8 @@ class ProductCreate(BaseModel):
     service_level: float = 0.95
     item_type: str = "purchased"
     max_weekly_capacity: Optional[float] = None
+    workstation_id: Optional[int] = None
+    production_flow_id: Optional[int] = None
 
 
 class ProductUpdate(BaseModel):
@@ -42,6 +72,9 @@ class ProductUpdate(BaseModel):
     active: Optional[bool] = None
     item_type: Optional[str] = None
     max_weekly_capacity: Optional[float] = None
+    abc_class: Optional[str] = None
+    workstation_id: Optional[int] = None
+    production_flow_id: Optional[int] = None
 
 
 def product_to_dict(p: Product, with_inventory: bool = True) -> dict:
@@ -56,6 +89,8 @@ def product_to_dict(p: Product, with_inventory: bool = True) -> dict:
         "safety_stock_qty": p.safety_stock_qty, "service_level": p.service_level,
         "abc_class": p.abc_class, "item_type": p.item_type or "purchased",
         "max_weekly_capacity": p.max_weekly_capacity,
+        "workstation_id": p.workstation_id,
+        "production_flow_id": p.production_flow_id,
         "smoothing_alpha": p.smoothing_alpha, "active": p.active,
     }
     if with_inventory and p.inventory:
@@ -138,7 +173,7 @@ def set_abc_service_levels(body: AbcServiceLevels, db: Session = Depends(get_db)
     products = db.query(Product).filter(Product.active == True).all()
     updated = 0
     for p in products:
-        if p.abc_class in mapping:
+        if p.abc_class in mapping and p.abc_class not in {'NPI', 'Phase Out'}:
             p.service_level = mapping[p.abc_class]
             updated += 1
     db.commit()
@@ -150,7 +185,9 @@ def update_product(pid: int, body: ProductUpdate, db: Session = Depends(get_db))
     p = db.query(Product).filter(Product.id == pid).first()
     if not p:
         raise HTTPException(404)
-    changes = body.model_dump(exclude_none=True)
+    changes = body.model_dump(exclude_unset=True)
+    if 'abc_class' in changes:
+        p.abc_locked = True
     for k, v in changes.items():
         old = getattr(p, k, None)
         setattr(p, k, v)
@@ -191,11 +228,14 @@ def recalculate_abc(db: Session = Depends(get_db)):
         enriched.append({"product": p, "revenue": revenue, "id": p.id})
 
     classified = classify_abc(enriched)
+    updated = 0
     for item in classified:
-        item["product"].abc_class = item["abc_class"]
+        if not item["product"].abc_locked:
+            item["product"].abc_class = item["abc_class"]
+            updated += 1
 
     db.commit()
-    return {"updated": len(classified)}
+    return {"updated": updated}
 
 
 @router.post("/recalculate-safety-stock")
@@ -204,22 +244,23 @@ def recalculate_safety_stock(db: Session = Depends(get_db)):
     cutoff = date.today() - timedelta(weeks=26)
     products = db.query(Product).filter(Product.active == True).all()
     updated = 0
+    exempt = {'NPI', 'Phase Out'}
     for p in products:
-        history = sorted(
-            [s.quantity for s in p.sales_history if s.period_date >= cutoff],
-        )
-        if len(history) < 2:
+        if p.abc_class in exempt:
             continue
-        avg = sum(history) / len(history)
-        std = statistics.stdev(history) if len(history) > 1 else 0
+        rows = [s for s in p.sales_history if s.period_date >= cutoff]
+        stats = _weekly_demand_stats(rows)
+        if stats is None:
+            continue
+        avg_weekly, std_weekly, avg_daily = stats
         sl = p.service_level or suggest_service_level(p.abc_class or "B")
-        ss = calculate_safety_stock(sl, std, p.lead_time_days)
-        rop = calculate_reorder_point(avg, p.lead_time_days, ss)
+        ss = calculate_safety_stock(sl, std_weekly, p.lead_time_days)
+        rop = calculate_reorder_point(avg_weekly, p.lead_time_days, ss)
         p.safety_stock_qty = ss
         p.reorder_point = rop
         if p.inventory:
-            p.inventory.avg_daily_demand = avg / 7
-            p.inventory.demand_std_dev = std
+            p.inventory.avg_daily_demand = round(avg_daily, 4)
+            p.inventory.demand_std_dev = round(std_weekly, 4)
         updated += 1
 
     db.commit()
@@ -228,14 +269,22 @@ def recalculate_safety_stock(db: Session = Depends(get_db)):
 
 @router.post("/recalculate-rop")
 def recalculate_rop(db: Session = Depends(get_db)):
+    from datetime import date, timedelta
+    cutoff = date.today() - timedelta(weeks=26)
     products = db.query(Product).filter(Product.active == True).all()
     updated = 0
     for p in products:
-        inv = p.inventory
-        avg_daily = inv.avg_daily_demand if inv and inv.avg_daily_demand else 0
+        rows = [s for s in p.sales_history if s.period_date >= cutoff]
+        stats = _weekly_demand_stats(rows)
+        if stats is None:
+            continue
+        avg_weekly, std_weekly, avg_daily = stats
         ss = p.safety_stock_qty or 0
-        lt = p.lead_time_days or 0
-        p.reorder_point = round(avg_daily * lt + ss, 1)
+        rop = calculate_reorder_point(avg_weekly, p.lead_time_days, ss)
+        p.reorder_point = rop
+        if p.inventory:
+            p.inventory.avg_daily_demand = round(avg_daily, 4)
+            p.inventory.demand_std_dev = round(std_weekly, 4)
         updated += 1
     db.commit()
     return {"updated": updated}

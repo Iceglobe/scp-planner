@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef } from 'react'
+import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import { Plus, Check, History, X, GitBranch } from 'lucide-react'
 import BOM from './BOM'
 import { ColDef, RowClassParams } from 'ag-grid-community'
@@ -11,6 +11,7 @@ import { DataTable } from '../components/tables/DataTable'
 import { abcCellRenderer, activeCellRenderer, trashCellRenderer, itemTypeCellRenderer } from '../components/tables/cellRenderers'
 import { Card, PageHeader, Button, Spinner } from '../components/ui'
 import { fmtCurrency, fmtPct } from '../utils/formatters'
+import { useFilters } from '../context/FilterContext'
 
 function statusRowClass(params: RowClassParams<Record<string, unknown>>) {
   const pos = (params.data?.position ?? 0) as number
@@ -258,6 +259,7 @@ function AddSupplierModal({ onClose, onSaved }: AddSupplierModalProps) {
 
 // ── Main Page ──────────────────────────────────────────────────────────────
 export default function MasterData() {
+  const { itemIds, productNames } = useFilters()
   const [products, setProducts] = useState<Product[]>([])
   const [suppliers, setSuppliers] = useState<Supplier[]>([])
   const [changelog, setChangelog] = useState<ChangeLogEntry[]>([])
@@ -348,6 +350,12 @@ export default function MasterData() {
   }, [loadProducts])
 
   const supplierNames = suppliers.map(s => s.name)
+
+  const filteredProducts = useMemo(() => products.filter(p => {
+    if (itemIds.length > 0 && !itemIds.includes(p.sku ?? '')) return false
+    if (productNames.length > 0 && !productNames.includes(p.description ?? '')) return false
+    return true
+  }), [products, itemIds, productNames])
 
   const productCols: ColDef[] = [
     {
@@ -509,7 +517,7 @@ export default function MasterData() {
             </Button>
           </div>
           <DataTable
-            rowData={products as unknown as Record<string, unknown>[]}
+            rowData={filteredProducts as unknown as Record<string, unknown>[]}
             columnDefs={productCols}
             height={510}
             rowClassRules={{ 'bg-red-50': statusRowClass }}

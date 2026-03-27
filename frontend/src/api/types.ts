@@ -10,13 +10,15 @@ export interface Product {
   moq: number; reorder_point: number; safety_stock_days: number;
   safety_stock_qty: number; service_level: number; abc_class?: string;
   item_type: string; max_weekly_capacity?: number;
+  workstation_id?: number;
+  production_flow_id?: number;
   smoothing_alpha: number; active: boolean;
   on_hand: number; on_order: number; reserved: number; position: number;
 }
 
 export interface SalesRecord {
   id: number; product_id: number; period_date: string;
-  quantity: number; revenue: number; source: string;
+  quantity: number; revenue: number; source: string; customer?: string;
 }
 
 export interface PeriodInfo {
@@ -26,7 +28,7 @@ export interface PeriodInfo {
 export interface PivotRow {
   product_id: number; sku: string; description: string;
   abc_class?: string; supplier?: string; lead_time_days: number;
-  safety_stock_qty: number; customer?: string;
+  safety_stock_qty: number; customer?: string; is_priority?: boolean;
   [key: string]: number | string | boolean | undefined;
 }
 
@@ -77,6 +79,8 @@ export interface Kpis {
   confirmed_po_value: number;
   items_at_risk: number; total_products: number;
   abc_counts: { A: number; B: number; C: number };
+  status_counts: { stockout: number; below_ss: number; healthy: number; overstocked: number };
+  last_mrp_run: { run_date: string; status: string; po_count: number } | null;
 }
 
 export interface TrendPoint {
@@ -89,6 +93,7 @@ export interface AbcItem {
   product_id: number; sku: string; description: string;
   category?: string; abc_class?: string; revenue: number;
   revenue_pct: number; cumulative_pct: number;
+  model_abc_class?: string; abc_locked?: boolean;
 }
 
 export interface ChangeLogEntry {
@@ -111,6 +116,7 @@ export interface MrpRow {
   supplier: string | null;
   label: string;
   safety_stock: number | null;
+  avg_weekly_demand: number | null;
   moq: number | null;
   max_weekly_capacity: number | null;
   item_type: string | null;
@@ -118,6 +124,8 @@ export interface MrpRow {
   on_hand_today: number | null;
   lead_time_days: number | null;
   work_center: string | null;
+  unit_cost: number | null;
+  selling_price: number | null;
   spo_ids?: Record<string, number[]>;
   [key: string]: unknown;
 }
@@ -150,4 +158,68 @@ export interface BomTreeNode {
   bom_id?: number;
   quantity_per?: number;
   children: BomTreeNode[];
+}
+
+export interface Workstation {
+  id: number
+  name: string
+  hours_per_day: number
+  days_per_week: number
+  cycle_rate_units_per_min: number
+  capacity_units_per_week: number
+  cycle_time_minutes: number
+  department?: string
+  notes?: string
+  product_count: number
+  created_at: string
+}
+
+export interface ProductionFlow {
+  id: number
+  name: string
+  workstation_ids: number[]
+  created_at: string
+}
+
+export interface ProductLoad {
+  product_id: number
+  sku: string
+  description: string
+  qty: number
+  load_minutes: number
+  has_priority_demand?: boolean
+}
+
+export interface WeeklyWorkstationLoad {
+  week_key: string
+  week_label: string
+  week_date: string
+  load_minutes: number
+  capacity_minutes: number
+  utilization_pct: number
+  is_bottleneck: boolean
+  products: ProductLoad[]
+}
+
+export interface WorkstationLoadResult {
+  workstation_id: number
+  workstation_name: string
+  department?: string
+  hours_per_day: number
+  days_per_week: number
+  cycle_rate_units_per_min: number
+  capacity_units_per_week: number
+  cycle_time_minutes: number
+  weekly_loads: WeeklyWorkstationLoad[]
+  peak_utilization_pct: number
+  avg_utilization_pct: number
+}
+
+export interface ValueStreamLoadResponse {
+  mrp_run_id?: string
+  horizon_weeks: number
+  threshold_pct: number
+  weeks: string[]
+  workstations: WorkstationLoadResult[]
+  unassigned_products: { product_id: number; sku: string; description: string }[]
 }
